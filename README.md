@@ -1,6 +1,6 @@
 # pi-sandbox-dsh
 
-A pi extension that confines the model's **write** actions with an OS boundary, modeled on a single reference source: [dsh](https://github.com/deepseek-ai/deepseek-harness).
+A pi extension that confines the model's **write** actions with an OS boundary — the **enforcement axis** of the plan/enforcement split. Modeled on a single reference source: [dsh](https://github.com/deepseek-ai/deepseek-harness).
 
 ## Model
 
@@ -16,6 +16,17 @@ A pi extension that confines the model's **write** actions with an OS boundary, 
   ```
 
 - When a write is denied, the model sees a `[sandbox: file access denied under <mode> mode]` marker and a hint that escalation is available. It retries with `sandbox_permissions` (the narrowest strictly-wider tier) + `justification`; a human approves; **only that call** runs under the wider tier.
+
+## Orthogonality
+
+The plan/enforcement split mirrors dsh and is fully orthogonal:
+
+| Axis | Extension | State | Role |
+|---|---|---|---|
+| Enforcement | `pi-sandbox-dsh` | `sandbox/mode` | write-boundary OS sandbox |
+| Guidance | `pi-plan-dsh` | `plan/mode` | soft prompt guidance |
+
+`sandbox` never reads or writes `plan` state (and vice-versa); the two are independent and configured separately. This mirrors dsh's own split: *"Plan mode is soft guidance. Sandbox mode and approval policy enforce restrictions independently; neither reads nor writes plan state."* Together this pair **replaces the deprecated `pi-plan-mode`**.
 
 ## Design rules
 
