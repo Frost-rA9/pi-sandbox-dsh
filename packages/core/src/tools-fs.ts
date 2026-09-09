@@ -1,15 +1,15 @@
 /**
- * pi-sandbox-dsh-core · 文件工具（write/edit）写面围栏。
+ * pi-sandbox-dsh-core · 文件工具（write/edit）写面门控（被拒即征求用户批准）。
  *
- * 对齐 dsh `fs-sandbox` + `tool-fs`：文件编辑工具在进程内调 fs API（不 spawn 进程），
- * OS 沙箱包不到 → 用进程内 `isPathUnder` 围栏判可写。读不受限。
+ * 对齐 dsh `tool-fs` 的"批准升级"语义，但触发点在 `tool_call` 门控（用户决策点），
+ * 不 fork pi 的 write/edit 工具。文件工具在进程内调 fs API（不 spawn 进程）→
+ * 用 `isPathUnder` 围栏判可写。读不受限。
  *
- * - read-only：禁止一切写。
- * - workspace-write：仅允许目标位于工作区根内。
+ * - read-only：禁写；被拒后征求"允许本次"（per-call 升级）。
+ * - workspace-write：仅允许目标位于工作区根内；被拒后同样征求。
  * - danger-full-access：放行。
- * 违规 → block + denial 标记 + escalation hint（模型可凭此升级）。
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
 import { sandboxDenialMarker, escalationHintMarker } from "pi-sandbox-dsh-bridge";
 import { isPathUnder, writableRoots } from "pi-sandbox-dsh-sandbox";
@@ -55,16 +55,32 @@ export function denyReason(decision: { reason?: string }, advertise: boolean): s
   return advertise ? `${base}\n${escalationHintMarker("operation")}` : base;
 }
 
-/** 注册 write/edit 工具写面门控（tool_call 钩子）。 */
-export function registerFileToolGate(pi: ExtensionAPI, state: SandboxState, readState: (cwd: string) => SandboxExecutionPolicy, advertise: () => boolean): void {
-  pi.on("tool_call", async (event) => {
+/** 注册 write/edit 工具写面门控（tool_call 钩子）：被拒即征求用户批准（per-call 升级）。 */
+export function registerFileToolGate(
+  pi: ExtensionAPI,
+  _state: SandboxState,
+  readState: (cwd: string) => SandboxExecutionPolicy,
+  advertise: () => boolean,
+): void {
+  pi.on("tool_call", async (event, ctx) => {
     const e = event as { type?: string; toolName?: string; input?: { path?: string } };
     if (e?.type !== "tool_call") return;
     if (!e.toolName || !FS_TOOLS.includes(e.toolName as (typeof FS_TOOLS)[number])) return;
+
     const decision = classifyFileWrite({ toolName: e.toolName, target: e.input?.path }, readState(process.cwd()));
-    if (decision.decision === "deny") {
-      return { block: true, reason: denyReason(decision, advertise()) };
+    if (decision.decision === "allow") return;
+
+    // 被拒：征求用户批准（用户决策点）；允许本次 → 放行（per-call 更宽）
+    if (advertise()) {
+      const ui = (ctx as ExtensionContext).ui;
+      if (ui?.select) {
+        const choice = await ui.select(
+          `沙箱拒绝写入《${e.input?.path ?? "?"}》（${decision.reason ?? "policy denial"}）。允许本次吗？`,
+          ["允许本次", "拒绝"],
+        );
+        if (choice === "允许本次") return;
+      }
     }
-    return;
+    return { block: true, reason: denyReason(decision, advertise()) };
   });
 }

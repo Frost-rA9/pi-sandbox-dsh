@@ -42,37 +42,19 @@ bash-sandbox (executor)         sandbox-local (provider)
 - `output.render`：denied 时在结果末尾追加 `[sandbox: file access denied under <mode> mode]` + `[sandbox: escalation available — retry …]`。
 
 ### 三段式 → pi 落地
-| 维度 | pi 原生 | dsh 语义 | pi 裁剪 |
+| 维度 | pi 原生 | dsh 语义 | pi 裁剪（门控驱动） |
 |---|---|---|---|
-| 工具 schema 加升级字段 | 重注册 bash 工具，扩展 `parameters`（typebox） | 传入 `sandbox_permissions`(enum)+`justification` | 复用 pi 的 bash 工具对象，`parameters` 里**追加**这两个字段；无沙箱 executor 时**不追加**（不广告） |
-| 批准 | `ctx.ui.select` | `approveEscalation`（严格更宽 + 人类确认） | 拦截 upgrade 参数 → 校验严格更宽 → `ctx.ui.select`（展示 justification）→ allowed-once=本次更宽 / rejected=拒绝 |
-| denial 渲染 | pi bash 工具结果是文本 | 结果尾部追加 `[sandbox: …]` 标记 | **覆写 bash `execute`**：跑完后若输出匹配 denial 方言（bwrap EROFS / winacl "Access is denied"），向 content 追加 `denialMarker + escalationHintMarker` |
-| 只作用于本次调用 | — | allowed-once → per-call wider | 批准的更宽 mode 只并入本次 policy，**不改全局档** |
+| 升级参数 | `tool_call` 门控 + `ctx.ui.select` | 工具带 `sandbox_permissions`+`justification` | **不 fork 工具**：文件工具被拒即征求用户批准；bash 升级走 `/sandbox <mode>`（更宽档确认） |
+| 批准 | `ctx.ui.select` | `approveEscalation`（严格更宽） | `ctx.ui.select` + 严格更宽校验（`/sandbox`） |
+| denial 渲染 | 门控 block + reason | 结果尾部 `[sandbox…]` 标记 | 门控拒绝的 block reason 带 denial+hint |
+| 只作用于本次调用 | — | allowed-once → per-call wider | 文件工具：门控放行仅本次；bash：`/sandbox` 全局持久档 |
 
-**实现要点**：
-```ts
-// 重新注册 bash 工具，保留原 schema 语义并加升级字段（无沙箱时字段不出现）
-pi.registerTool({
-  ...baseBashTool,
-  parameters: { ...baseBashTool.parameters, ...(escalationAdvertised ? {
-    sandbox_permissions: {...}, justification: {...},
-  } : {}) },
-  execute: async (id, params, signal, onUpdate) => {
-    const standing = resolvePolicy(session)
-    let mode = standing.mode
-    if (params.sandbox_permissions && params.justification) {
-      mode = await approveEscalation({ requestedMode, justification, effectiveMode: mode, subject:'command' },
-                                     { approver: ui.select, agent, callId, toolName:'bash', signal })
-    }
-    const result = await baseBashTool.execute(id, {...params}, signal, onUpdate)
-    if (mode !== 'danger-full-access' && looksLikeDenial(result)) {
-      return appendMarkers(result, mode)   // denial + hint
-    }
-    return result
-  },
-})
-```
-其中 `looksLikeDenial(result)` 匹配当前后端的 `denialSignatures`（bwrap `read-only file system`；winacl `access is denied`/`permission denied`/…）。
+> 说明：pi 的 `spawnHook` 是同步、只读全局 policy，无法把"本次调用批准的更宽档"传进去，故 bash 不做逐命令升级（避免命令白名单启发式）；升级收敛到全局 `/sandbox`。
+
+**实现要点（门控驱动，不重注册工具）**：
+- bash：`createBashTool(workspaceRoot, toolOptions)` 直接注册（`spawnHook` 收敛到全局档）；升级走 `/sandbox <mode>`（更宽档 `ctx.ui.select` 确认）。
+- write/edit：`tool_call` 门控 `classifyFileWrite`（`isPathUnder` 围栏）→ 被拒 `ctx.ui.select` 征求"允许本次" → 放行仅本次；拒绝 → block(denial+hint)。
+- 全部审批在**门控/命令**处（用户决策点），无一工具 schema 分支。
 
 ## 2. executor 层（`@deepseek-ai/dsh-bash-sandbox`）
 - `run/start`：`danger-full-access` → 原样执行；否则 `confine(['bash','-c',cmd], policy)`（provider 包装 argv）。
@@ -140,15 +122,15 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 | 1 | 全局档位（read-only/workspace-write/danger + 默认） | 全局档 = appendEntry 折叠 + `/sandbox` 命令 | 原生(折叠)+dsh(3档有效默认)+裁剪(无plan档) |
 | 2 | 档位解析（explicit>session>default；root=cwd） | `resolvePolicy(session)` 纯函数 | 同 dsh |
 | 3 | 命令写面收敛（confine） | spawnHook(bwrap) / operations.exec(winacl) | 原生工具钩子 + dsh 后端 |
-| 4 | 写被拒 → denial marker + hint | execute 覆写探测 denial 方言 → 追加标记 | 原生(文本结果)+dsh(标记) |
-| 5 | 模型升级（sandbox_permissions+justification） | bash 工具 schema 追加字段 | 原生(工具schema)+dsh(参数) |
-| 6 | 批准（approveEscalation） | `ctx.ui.select` + 严格更宽校验 | 原生(ui.select)+dsh(词表) |
-| 7 | per-call 更宽（不持久） | 批准的 mode 只并入本次 policy | 同 dsh |
+| 4 | 写被拒 → denial marker + hint | 门控被拒 → `ctx.ui.select` 征求批准；拒绝 → block(denial+hint) | 原生(ui.select)+dsh(标记) |
+| 5 | 模型升级（sandbox_permissions+justification） | **不 fork 工具**：文件工具→门控被拒即征求；bash→全局 `/sandbox` 切换 | 原生(门控/命令)+dsh(批准语义) + 裁剪(最小暴露面) |
+| 6 | 批准（approveEscalation） | `ctx.ui.select`（门控 + `/sandbox` 更宽档确认）+ 严格更宽校验 | 原生(ui.select)+dsh(词表) |
+| 7 | per-call 更宽（不持久） | 文件工具：门控放行仅本次；bash：全局 `/sandbox`（持久档） | 同 dsh（语义）+ 裁剪 |
 | 8 | fail-closed（SANDBOX_UNAVAILABLE） | 后端不可用 → 拒绝（block）| 原生(block)+dsh(降级为拒绝) |
 | 9 | 系统提示档位段 | before_agent_start 追加 | 原生 + dsh(renderPolicyContext) |
 | 10 | 后端（bwrap/winacl，只限写） | 复用骨架，**去掉凭据隐藏/plan档** | 原生 + dsh(读全开/网络) |
 
-## 7. plan-mode 与沙箱正交（解耦依据）
+## 8. plan-mode 与沙箱正交（解耦依据）
 
 **dsh 的 plan-mode 与沙箱正交、解耦**（源码实证）：
 
@@ -158,17 +140,22 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 
 **结论**：pi-sandbox-dsh **不含 plan-mode**——沙箱管写、计划管工作流，两者是**正交两层**。将来若做计划工作流扩展（如 opencode 版），应做成**独立的软引导层**，与本沙箱**解耦共存**，绝不焊成"相位开关沙箱"。
 
-## 8. 模式持久化（session-mode）与文件工具围栏（待实现）
+## 9. 模式持久化 + 门控驱动（两条正交轴）
 
 **模式写路径（对齐 dsh `session-mode.ts`）**：全局档 = 只追加一条 log-only `sandbox/mode` 事件；`effective = 折叠态 ?? 部署默认`。存活靠会话重放，无外部配置 store，不建内存真源（不变量 6）。pi 落点：`appendEntry("sandbox/mode", { mode })` + 纯折叠；`/sandbox <mode>` 命令走此写路径。
 
+**门控驱动（统一，不 fork 任何 pi 工具）**：
+- **bash**：bwrap `spawnHook` 读全局档收敛（不重注册工具、无 escalation 字段）；升级走全局 `/sandbox <mode>`（更宽档经 `ctx.ui.select` 确认）。
+- **文件工具（write/edit）**：`tool_call` 门控 `isPathUnder` 围栏；被拒 → `ctx.ui.select` 征求"允许本次"（per-call 升级）；拒绝 → block(denial+hint)。不 fork write/edit。
+- 全部批准/拒绝在门控或命令（`/sandbox`）处完成 = **用户决策点**；无工具 schema 分支、无命令白名单。
+
 **两条正交轴（弄清"fs 侧"）**：
 - **平台轴**：Linux/mac（bwrap/landlock/seatbelt）vs Windows（winacl）——选哪个 **OS 沙箱后端**。
-- **能力轴**：shell（bash/pwsh，spawn 进程 → 由 OS 沙箱包 argv）vs **文件工具**（write/edit，在进程内调 fs API，不 spawn 进程）。
+- **能力轴**：shell（bash/pwsh，spawn 进程 → 由 OS 沙箱包 argv）vs **文件工具**（write/edit，进程内调 fs API，不 spawn 进程 → 进程内 `isPathUnder` 围栏）。
 
-**文件工具写面（dsh `fs-sandbox` + `tool-fs`，最小复现）**：文件编辑工具不 spawn 进程，OS 沙箱包不到——dsh 用**进程内路径围栏**（`isPathUnder`：词法快路径判断 target 是否在可写根内，不匹配时用文件系统身份兜底，处理 Windows 8.3/大小写别名）配合 fs-tool 的 escalation/denial。**读全部放开**（每种模式都允许读）。pi 落点：`edit`/`write` 工具的 execute 前置 `isPathUnder(target, workspaceRoot)` 判可写 + 升级提示。
+**文件工具写面（dsh `fs-sandbox` + `tool-fs`）**：`isPathUnder`（词法快路径 + 文件系统身份兜底，处理 Windows 8.3/大小写别名）+ 门控被拒即征求批准。**读全部放开**（每种模式都允许读）。
 
-## 9. 验证
+## 10. 验证
 
 - `npm run typecheck`（strict）。
 - `npm test`：pure（bridge）——`WIDER_MODES` 严格更宽 / `approveEscalation` 各结果 / `validateEscalationArgs` / `resolvePolicy` 优先级 / `sandboxDenialMarker`/`escalationHintMarker` / backlog denial 探测；`selectBackend` / bwrap / winacl 签名。
