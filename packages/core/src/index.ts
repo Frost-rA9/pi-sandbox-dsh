@@ -5,8 +5,8 @@
  * 装配：运行时 store（全局档折叠）→ 后端（bwrap/winacl）bash 工具（spawnHook 收敛，不 fork）
  * → 文件工具门控（write/edit，被拒即征求批准）→ `/sandbox` 命令（更宽档需确认）→ 档位提示段。
  */
-import { createBashTool, createPowerShellTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
+import { createBashTool, createPowerShellTool, type ExtensionAPI, type ExtensionUIContext, type Theme } from "@earendil-works/pi-coding-agent";
+import type { SandboxExecutionPolicy, SandboxMode } from "pi-sandbox-dsh-bridge";
 import {
   DEFAULT_SANDBOX_MODE,
   renderPolicyContext,
@@ -18,13 +18,34 @@ import { selectBackend, type SandboxBackend } from "pi-sandbox-dsh-sandbox";
 import { initState, foldSandboxMode, SANDBOX_MODE_ENTRY, type SandboxState } from "./state.ts";
 import { registerFileToolGate } from "./tools-fs.ts";
 
+/** 徽标文案 `[<mode>]`：只读=橙(256色208，pi 主题无橙)、工作区可写=蓝(accent)、全权=红(error)。 */
+function sandboxBadgeText(theme: Theme, mode: SandboxMode): string {
+  switch (mode) {
+    case 'read-only':
+      return '\x1B[38;5;208m[read-only]\x1B[0m';
+    case 'workspace-write':
+      return theme.fg('accent', '[workspace-write]');
+    case 'danger-full-access':
+      return theme.fg('error', '[danger-full-access]');
+    default:
+      return '[sandbox]';
+  }
+}
+
 export default function sandboxExtension(pi: ExtensionAPI): void {
   const store: SandboxState = initState(DEFAULT_SANDBOX_MODE, process.cwd());
+
+  // footer 徽标（方案 A）：setStatus 写入 pi footer 状态槽（不替换、永不丢信息、不随 pi 升级漂移）
+  const updateSandboxBadge = (ui: ExtensionUIContext | undefined): void => {
+    if (!ui) return;
+    ui.setStatus('pi-sandbox-dsh', sandboxBadgeText(ui.theme, store.mode));
+  };
 
   pi.on("session_start", (_event, ctx) => {
     store.workspaceRoot = ctx.cwd;
     const entries = (ctx.sessionManager?.getEntries?.() ?? []) as readonly unknown[];
     store.mode = foldSandboxMode(entries as never, store.defaultMode);
+    updateSandboxBadge(ctx.ui);
   });
 
   // 读取当前执行 policy（spawnHook 用）
@@ -79,6 +100,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       }
       const prev = store.mode;
       store.mode = input;
+      updateSandboxBadge(ctx.ui);
       pi.appendEntry(SANDBOX_MODE_ENTRY, { mode: input });
       pi.sendMessage(
         { customType: `${SANDBOX_MODE_ENTRY}:notice`, content: `沙箱档位已切换: ${prev} → ${input}`, display: true },
