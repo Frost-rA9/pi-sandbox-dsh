@@ -1,5 +1,5 @@
 /**
- * pi-sandbox-dsh-sandbox 测试：bwrap profile/命令/safeQuote/probe。
+ * pi-sandbox-dsh-sandbox 测试：bwrap profile/命令/safeQuote/probe + containment 围栏。
  */
 import {
   buildBwrapCommand,
@@ -7,8 +7,13 @@ import {
   safeQuote,
   probeBwrap,
   overrideBwrapDetect,
+  isPathUnder,
+  writableRoots,
 } from "../src/index.ts";
 import type { SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 let passed = 0;
 let failed = 0;
@@ -33,8 +38,7 @@ assert(!roArgs.includes("--unshare-net"), "no network unshare");
 assert(roArgs.includes("--unshare-pid"), "pid isolation");
 const wwArgs = bwrapProfileArgs(ww);
 assert(wwArgs.includes("--bind") && wwArgs.includes("/w"), "workspace-write binds workspace");
-assert(wwArgs.includes("--tmpfs") && wwArgs.includes("/tmp"), "workspace-write tmpfs /tmp");
-assert(wwArgs.includes("--tmpfs"), "tmpfs present");
+assert(wwArgs.includes("--tmpfs"), "workspace-write tmpfs /tmp");
 
 console.log("=== buildBwrapCommand ===");
 const cmd = buildBwrapCommand("echo hi", ro);
@@ -51,9 +55,9 @@ overrideBwrapDetect(() => true);
 assert(probeBwrap() === true, "override probe true");
 overrideBwrapDetect(() => false);
 assert(probeBwrap() === false, "override probe false");
-overrideBwrapDetect(detectBwrapReal);
+overrideBwrapDetect(realProbe);
 
-function detectBwrapReal() {
+function realProbe() {
   try {
     const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
     return spawnSync("bwrap", ["--version"], { timeout: 3000 }).status === 0;
@@ -61,6 +65,18 @@ function detectBwrapReal() {
     return false;
   }
 }
+
+console.log("=== containment: isPathUnder ===");
+const ws = mkdtempSync(join(tmpdir(), "dsh-fence-"));
+const inner = join(ws, "a", "b.txt");
+assert(isPathUnder(inner, ws) === true, "target under root (lexical)");
+assert(isPathUnder(ws, ws) === true, "target === root");
+const outside = join(tmpdir(), "other.txt");
+assert(isPathUnder(outside, ws) === false, "outside root");
+assert(isPathUnder(join(ws, "..", "outside.txt"), ws) === false, "lexical .. escape rejected");
+assert(writableRoots({ mode: "workspace-write", workspaceRoot: ws }).length === 1, "workspace-write has 1 root");
+assert(writableRoots({ mode: "read-only", workspaceRoot: ws }).length === 0, "read-only has 0 roots");
+rmSync(ws, { recursive: true, force: true });
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -1,5 +1,5 @@
 /**
- * pi-sandbox-dsh-core 纯逻辑测试：状态折叠 / 标记 / denial 探测 / 升级词表。
+ * pi-sandbox-dsh-core 纯逻辑测试：状态折叠 / 标记 / denial 探测 / 升级词表 / 文件工具围栏。
  */
 import { foldSandboxMode } from "../src/state.ts";
 import {
@@ -9,6 +9,7 @@ import {
   appendSandboxMarkers,
   bashDescription,
 } from "../src/tools.ts";
+import { classifyFileWrite, denyReason } from "../src/tools-fs.ts";
 
 let passed = 0;
 let failed = 0;
@@ -49,6 +50,18 @@ assert(JSON.stringify(marked.content).includes("file access denied under read-on
 assert(JSON.stringify(marked.content).includes("escalation available"), "hint appended when advertised");
 const markedNoHint = appendSandboxMarkers(denied, "read-only", false);
 assert(!JSON.stringify(markedNoHint.content).includes("escalation available"), "no hint when not advertised");
+
+console.log("=== tools-fs: classifyFileWrite ===");
+const roPolicy = { mode: "read-only" as const, workspaceRoot: "/w" };
+const wwPolicy = { mode: "workspace-write" as const, workspaceRoot: "/w" };
+const danger = { mode: "danger-full-access" as const, workspaceRoot: "/w" };
+assert(classifyFileWrite({ toolName: "write", target: "/w/a.txt" }, roPolicy).decision === "deny", "read-only denies write");
+assert(classifyFileWrite({ toolName: "edit", target: "/w/a.txt" }, wwPolicy).decision === "allow", "workspace-write allows in root");
+assert(classifyFileWrite({ toolName: "write", target: "/outside.txt" }, wwPolicy).decision === "deny", "workspace-write denies outside");
+assert(classifyFileWrite({ toolName: "write", target: "/outside.txt" }, danger).decision === "allow", "danger allows");
+assert(classifyFileWrite({ toolName: "write", target: undefined }, wwPolicy).decision === "deny", "no target denies");
+assert(denyReason({ reason: "x" }, true).includes("escalation available"), "denyReason adds hint when advertise");
+assert(!denyReason({ reason: "x" }, false).includes("escalation available"), "denyReason omits hint when not advertise");
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

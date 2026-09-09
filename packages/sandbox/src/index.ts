@@ -15,3 +15,4 @@ export {
   type SandboxBackend,
   type BackendContext,
 } from "./backend.ts";
+export { isPathUnder, writableRoots } from "./containment.ts";

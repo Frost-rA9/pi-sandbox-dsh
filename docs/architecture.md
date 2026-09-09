@@ -158,11 +158,15 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 
 **结论**：pi-sandbox-dsh **不含 plan-mode**——沙箱管写、计划管工作流，两者是**正交两层**。将来若做计划工作流扩展（如 opencode 版），应做成**独立的软引导层**，与本沙箱**解耦共存**，绝不焊成"相位开关沙箱"。
 
-## 8. 模式持久化（session-mode）与 fs 侧围栏（待实现）
+## 8. 模式持久化（session-mode）与文件工具围栏（待实现）
 
 **模式写路径（对齐 dsh `session-mode.ts`）**：全局档 = 只追加一条 log-only `sandbox/mode` 事件；`effective = 折叠态 ?? 部署默认`。存活靠会话重放，无外部配置 store，不建内存真源（不变量 6）。pi 落点：`appendEntry("sandbox/mode", { mode })` + 纯折叠；`/sandbox <mode>` 命令走此写路径。
 
-**fs 侧（dsh `fs-sandbox` + `tool-fs`，最小复现）**：除 bash 外，**文件工具（edit/write）也要写面受限**——dsh 用**进程内路径围栏**（`isPathUnder`：词法快路径判断 target 是否在可写根内，不匹配时用文件系统身份兜底，识别 Windows 8.3/大小写别名）配合 fs-tool 的 escalation/denial。pi 落点：`edit`/`write` 工具的 execute 前置 `isPathUnder(target, workspaceRoot)` 判可写 + 升级提示。
+**两条正交轴（弄清"fs 侧"）**：
+- **平台轴**：Linux/mac（bwrap/landlock/seatbelt）vs Windows（winacl）——选哪个 **OS 沙箱后端**。
+- **能力轴**：shell（bash/pwsh，spawn 进程 → 由 OS 沙箱包 argv）vs **文件工具**（write/edit，在进程内调 fs API，不 spawn 进程）。
+
+**文件工具写面（dsh `fs-sandbox` + `tool-fs`，最小复现）**：文件编辑工具不 spawn 进程，OS 沙箱包不到——dsh 用**进程内路径围栏**（`isPathUnder`：词法快路径判断 target 是否在可写根内，不匹配时用文件系统身份兜底，处理 Windows 8.3/大小写别名）配合 fs-tool 的 escalation/denial。**读全部放开**（每种模式都允许读）。pi 落点：`edit`/`write` 工具的 execute 前置 `isPathUnder(target, workspaceRoot)` 判可写 + 升级提示。
 
 ## 9. 验证
 

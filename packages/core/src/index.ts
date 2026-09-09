@@ -11,6 +11,7 @@ import { DEFAULT_SANDBOX_MODE, renderPolicyContext, isSandboxMode, SANDBOX_MODE_
 import { selectBackend, type SandboxBackend } from "pi-sandbox-dsh-sandbox";
 import { initState, foldSandboxMode, SANDBOX_MODE_ENTRY, type SandboxState } from "./state.ts";
 import { registerBashTool } from "./tools.ts";
+import { registerFileToolGate } from "./tools-fs.ts";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
   const store: SandboxState = initState(DEFAULT_SANDBOX_MODE, process.cwd());
@@ -48,6 +49,9 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     backendError = e instanceof Error ? e.message : String(e);
     backend = undefined;
   }
+
+  // 文件工具（write/edit）写面门控
+  registerFileToolGate(pi, store, readState, () => store.mode !== "danger-full-access");
 
   // `/sandbox <mode>` 命令：切换全局档（appendEntry 日志真源）
   pi.registerCommand("sandbox", {
