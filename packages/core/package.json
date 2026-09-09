@@ -8,7 +8,7 @@
   "pi": { "extensions": ["./index.ts"] },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types test/core.spec.ts"
+    "test": "node --experimental-strip-types test/core.spec.ts && node --experimental-strip-types test/load.spec.ts"
   },
   "dependencies": {
     "pi-sandbox-dsh-bridge": "file:../bridge",

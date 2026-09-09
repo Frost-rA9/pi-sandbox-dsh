@@ -165,6 +165,10 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 | 门控驱动 / `/sandbox`（用户决策点，不 fork 工具） | ✅ 已实现 |
 | **winacl（Windows）后端** | ⏳ **结构已接**（selectBackend→winacl、probe、runner argv、SID 派生、路径边界，均可测）；**令牌/ACE/FFI runner 为 Windows-only，本机无法运行验证，须 Windows 真机 probe** |
 
+**Linux 验证（已完成，真机 bwrap 执行）**：
+- `bwrap-e2e.spec.ts`（真机）：read-only 写工作区→EROFS；read-only 读→成功；workspace-write 写→成功；**无凭据隐藏**（~/.gitconfig 可读）。7/7。
+- `core load.spec.ts`（mock pi 实例化扩展）：注册 bash 工具 + `/sandbox` 命令 + `tool_call` 钩子 + `session_start` 折叠 + `before_agent_start` 档位提示段。8/8。
+
 ## 11. 验证
 
 - `npm run typecheck`（strict）。
