@@ -155,7 +155,17 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 
 **文件工具写面（dsh `fs-sandbox` + `tool-fs`）**：`isPathUnder`（词法快路径 + 文件系统身份兜底，处理 Windows 8.3/大小写别名）+ 门控被拒即征求批准。**读全部放开**（每种模式都允许读）。
 
-## 10. 验证
+## 10. 实现状态（截至提交）
+
+| 部分 | 状态 |
+|---|---|
+| bridge（档位/升级词表/policy/denial） | ✅ 已实现 + 测试 |
+| bwrap（Linux/WSL2 写面） | ✅ 已实现 + 测试 |
+| 文件工具围栏（`isPathUnder` + 门控被拒即征求批准） | ✅ 已实现 + 测试 |
+| 门控驱动 / `/sandbox`（用户决策点，不 fork 工具） | ✅ 已实现 |
+| **winacl（Windows）后端** | ⏳ **结构已接**（selectBackend→winacl、probe、runner argv、SID 派生、路径边界，均可测）；**令牌/ACE/FFI runner 为 Windows-only，本机无法运行验证，须 Windows 真机 probe** |
+
+## 11. 验证
 
 - `npm run typecheck`（strict）。
 - `npm test`：pure（bridge）——`WIDER_MODES` 严格更宽 / `approveEscalation` 各结果 / `validateEscalationArgs` / `resolvePolicy` 优先级 / `sandboxDenialMarker`/`escalationHintMarker` / backlog denial 探测；`selectBackend` / bwrap / winacl 签名。

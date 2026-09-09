@@ -7,6 +7,7 @@
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import type { SandboxBackendInfo, SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
 import { buildBwrapCommand, probeBwrap } from "./bwrap.ts";
+import { createWinaclBackend } from "./winacl.ts";
 
 /** 后端构建时的宿主上下文（core 组装，随扩展开销一次）。 */
 export interface BackendContext {
@@ -16,11 +17,15 @@ export interface BackendContext {
 
 export interface SandboxBackend {
   readonly info: SandboxBackendInfo;
+  readonly kind: "bwrap" | "winacl";
+  readonly shellTool: "bash" | "powershell";
   probe(): boolean;
   createToolOptions(ctx: BackendContext): BashToolOptions;
 }
 
 class BwrapBackend implements SandboxBackend {
+  readonly kind = "bwrap" as const;
+  readonly shellTool = "bash" as const;
   readonly info: SandboxBackendInfo = { kind: "bwrap", available: false, shellTool: "bash" };
 
   probe(): boolean {
@@ -44,8 +49,7 @@ class BwrapBackend implements SandboxBackend {
 
 export function selectBackend(platform: string = process.platform): SandboxBackend {
   if (platform === "win32") {
-    // winacl 后端后续接入（受限令牌 + NTFS ACE + Node runner）。
-    throw new Error("pi-sandbox-dsh: winacl 后端尚未接入（Windows）；本版仅 bwrap（Linux/WSL2）");
+    return createWinaclBackend();
   }
   return new BwrapBackend();
 }

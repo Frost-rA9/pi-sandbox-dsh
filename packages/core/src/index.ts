@@ -5,7 +5,7 @@
  * 装配：运行时 store（全局档折叠）→ 后端（bwrap/winacl）bash 工具（spawnHook 收敛，不 fork）
  * → 文件工具门控（write/edit，被拒即征求批准）→ `/sandbox` 命令（更宽档需确认）→ 档位提示段。
  */
-import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createPowerShellTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
 import {
   DEFAULT_SANDBOX_MODE,
@@ -41,8 +41,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     backend = selectBackend();
     if (backend.probe()) {
       const toolOptions = backend.createToolOptions({ workspaceRoot: store.workspaceRoot, readState });
-      // createBashTool 直接注册：bash 工具保持 pi 原样，仅多加 spawnHook 收敛
-      pi.registerTool(createBashTool(store.workspaceRoot, toolOptions) as never);
+      // winacl → powershell（受限令牌 × git-bash 不兼容）；bwrap → bash。均不加升级字段（不 fork）。
+      const shellTool =
+        backend.shellTool === "powershell"
+          ? createPowerShellTool(store.workspaceRoot, toolOptions as never)
+          : createBashTool(store.workspaceRoot, toolOptions);
+      pi.registerTool(shellTool as never);
     } else {
       backendError = "沙箱后端探测失败（bwrap --version 未通过）；bash 未加收敛";
     }
