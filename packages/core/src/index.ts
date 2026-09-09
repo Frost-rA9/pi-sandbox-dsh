@@ -11,8 +11,8 @@ import {
   DEFAULT_SANDBOX_MODE,
   renderPolicyContext,
   isSandboxMode,
-  isStrictlyWider,
   SANDBOX_MODE_DESCRIPTIONS,
+  SANDBOX_MODES,
 } from "pi-sandbox-dsh-bridge";
 import { selectBackend, type SandboxBackend } from "pi-sandbox-dsh-sandbox";
 import { initState, foldSandboxMode, SANDBOX_MODE_ENTRY, type SandboxState } from "./state.ts";
@@ -84,26 +84,37 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     description: "显示/切换全局沙箱档位（read-only | workspace-write | danger-full-access）。",
     handler: async (args, ctx) => {
       const input = (args ?? "").trim();
-      if (input === "") {
-        ctx.ui.notify(`当前沙箱档: ${store.mode}\n描述: ${SANDBOX_MODE_DESCRIPTIONS[store.mode]}\n切换: /sandbox <mode>`, "info");
+
+      // 交互选档位：空参数或非法参数时弹 picker（对齐 /model，避免手输打错）。
+      // 显式合法档仍走字符参数（脚本/精确切换）。无交互 UI 时退回提示。
+      let mode: SandboxMode;
+      if (isSandboxMode(input)) {
+        mode = input;
+      } else if (ctx.ui?.select) {
+        const picked = await ctx.ui.select(`选择沙箱档位。（当前: ${store.mode}）`, [...SANDBOX_MODES]);
+        if (!picked) return; // 取消/超时
+        mode = picked as SandboxMode;
+        ctx.ui.notify(`已选择: ${mode} — ${SANDBOX_MODE_DESCRIPTIONS[mode]}`, "info");
+      } else {
+        ctx.ui.notify(
+          input === ""
+            ? `当前沙箱档: ${store.mode}\n描述: ${SANDBOX_MODE_DESCRIPTIONS[store.mode]}\n切换: /sandbox <mode>`
+            : `无效档位: ${input}。可选: ${SANDBOX_MODES.join(" / ")}`,
+          input === "" ? "info" : "error",
+        );
         return;
       }
-      if (!isSandboxMode(input)) {
-        ctx.ui.notify(`无效档位: ${input}。可选: read-only / workspace-write / danger-full-access`, "error");
-        return;
-      }
-      if (input === store.mode) return;
-      // 更宽档（read-only → workspace-write/danger，或 workspace-write → danger）需用户确认
-      if (isStrictlyWider(store.mode, input)) {
-        const choice = await ctx.ui.select(`切换到更宽沙箱档 ${input}？（之前: ${store.mode}）`, ["切换", "取消"]);
-        if (choice !== "切换") return;
-      }
+
+      if (mode === store.mode) return;
+      // 高危操作：任何档位切换（宽/窄、picker/字符参数一视同仁）都强制二次确认
+      const choice = await ctx.ui.select(`确认切换到沙箱档位 ${mode}？（之前: ${store.mode}）`, ["切换", "取消"]);
+      if (choice !== "切换") return;
       const prev = store.mode;
-      store.mode = input;
+      store.mode = mode;
       updateSandboxBadge(ctx.ui);
-      pi.appendEntry(SANDBOX_MODE_ENTRY, { mode: input });
+      pi.appendEntry(SANDBOX_MODE_ENTRY, { mode });
       pi.sendMessage(
-        { customType: `${SANDBOX_MODE_ENTRY}:notice`, content: `沙箱档位已切换: ${prev} → ${input}`, display: true },
+        { customType: `${SANDBOX_MODE_ENTRY}:notice`, content: `沙箱档位已切换: ${prev} → ${mode}`, display: true },
         { deliverAs: "steer" },
       );
     },

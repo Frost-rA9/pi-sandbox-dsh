@@ -25,6 +25,9 @@ export function isConfinedMode(mode: SandboxMode): mode is ConfinedSandboxMode {
 /** 默认档（fail-safe）：dsh 部署默认即 read-only。 */
 export const DEFAULT_SANDBOX_MODE: SandboxMode = 'read-only'
 
+/** 全部档位（窄→宽，/sandbox 交互选择与错误提示共用单源）。 */
+export const SANDBOX_MODES: readonly SandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access']
+
 /**
  * 严格更宽阶梯：某档位可升级到的更宽档集合。执行时判定，绝不 baked 进 schema。
  * 对齐 dsh `escalation.ts` WIDER_MODES。
