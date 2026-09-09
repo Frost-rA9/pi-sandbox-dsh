@@ -1,0 +1,39 @@
+{
+  "name": "pi-sandbox-dsh",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Write-boundary OS sandbox for pi as a continuous agent with a global tier ladder + progressive approval, modeled on dsh. No plan/build dual mode, no command allowlist, reads unrestricted.",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm test --workspaces",
+    "probe": "node --experimental-strip-types packages/sandbox/src/probe.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "optionalDependencies": {
+    "koffi": "^3.1.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.3"
+  }
+}
