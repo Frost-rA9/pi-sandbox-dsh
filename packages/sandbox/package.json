@@ -1,0 +1,26 @@
+{
+  "name": "pi-sandbox-dsh-sandbox",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OS write-boundary backend for pi-sandbox-dsh (dsh single source): bwrap (Linux/WSL2) read-only base + workspace-write bind, no credential masking, no network unshare. Backend is a library imported by core (BashSpawnHook is synchronous).",
+  "keywords": ["pi-package", "pi-sandbox"],
+  "license": "MIT",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types test/sandbox.spec.ts"
+  },
+  "dependencies": {
+    "pi-sandbox-dsh-bridge": "file:../bridge"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

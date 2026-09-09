@@ -1,0 +1,28 @@
+{
+  "name": "pi-sandbox-dsh-core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "pi-sandbox-dsh core (host): continuous-agent global sandbox tier (appendEntry `sandbox/mode` fold), per-call policy resolution, bash-tool escalation + denial markers, /sandbox command, before_agent_start policy section. Single reference source: dsh.",
+  "keywords": ["pi-package", "pi-extension"],
+  "license": "MIT",
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types test/core.spec.ts"
+  },
+  "dependencies": {
+    "pi-sandbox-dsh-bridge": "file:../bridge",
+    "pi-sandbox-dsh-sandbox": "file:../sandbox"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.3"
+  }
+}

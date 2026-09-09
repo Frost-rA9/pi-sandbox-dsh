@@ -1,119 +1,171 @@
-# pi-sandbox-dsh · 技术设计（dsh 单源）
+# pi-sandbox-dsh · 技术设计（dsh 单源，完整复现）
 
 > 配套：根 `AGENTS.md`（本地设计依据，gitignored）；本文为可入库的架构/设计说明。
-> 参考源：**dsh**（`deepseek-harness`）@ `~/projects/deepseek-harness`，版本 HEAD `5dda764`。
+> 参考源：**dsh**（`deepseek-harness`）@ `~/projects/deepseek-harness`，HEAD `5dda764`。
+> 本文把 dsh 沙箱**全链路**（tool 层 → executor → provider → policy → escalation → 渲染 → 后端）逐一映射到 pi 扩展 API，并用**三段式判定门**（pi 原生 → dsh 语义 → pi 裁剪）给出每条功能的落地。
 
 ---
 
-## 1. 目标
-
-做一个 pi 扩展，让模型在**连续会话**下：
-- 默认运行在**只读**档（`read-only`），读全开、不落盘；
-- 需要写/改时，**逐级批准升级**（`read-only → workspace-write → danger-full-access`），经人类确认；
-- **无计划/构建相位**，无命令白名单，无读隐藏；沙箱只在**写面**做 OS 边界。
-
-## 2. dsh 模型（源码锚点）
-
-### 2.1 档位阶梯（`sandbox/src/index.ts:29`）
-```ts
-export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
-export type ConfinedSandboxMode = Exclude<SandboxMode, 'danger-full-access'>
-```
-
-### 2.2 严格更宽（`escalation.ts:28`）
-```ts
-const WIDER_MODES = {
-  'read-only':        ['workspace-write', 'danger-full-access'],
-  'workspace-write':  ['danger-full-access'],
-}
-const ESCALATION_TARGETS = ['workspace-write', 'danger-full-access']
-```
-
-### 2.3 批准升级（`escalation.ts:157` `approveEscalation`）
-执行前按序：
-1. 校验 `requestedMode` 是否严格更宽于 `effectiveMode`（非更宽 → 抛错，**不弹窗**）；
-2. 无 approval 通道 / 无 agent → fail-closed 抛错；
-3. 走 `approver.request({ reason: 'escalate sandbox to <mode>: <justification>' })`；
-4. 结果映射：`allowed-once` → 返回 granted mode；`rejected`/`cancelled`/`unavailable` → 抛对应文本。
-
-### 2.4 模型侧标记（`escalation.ts:71/83`）
-```ts
-sandboxDenialMarker(mode)  → `[sandbox: file access denied under ${mode} mode]`
-escalationHintMarker(subj) → `[sandbox: escalation available — retry this exact ${subject} once with sandbox_permissions (…) + justification; the approval prompt asks the user]`
-```
-
-### 2.5 fail-closed（`index.ts` `SandboxUnavailableError`）
-confined 档请求但无可用后端 → 抛 `SANDBOX_UNAVAILABLE`，**绝不静默降级为无沙箱**。
-
-## 3. pi 原生机制（映射基础）
-
-| pi API | 说明 |
-|---|---|
-| `pi.registerTool` / `pi.setActiveTools` | 注册/调整工具面 |
-| `createBashTool(root, { spawnHook })` | 覆盖 bash，`spawnHook` 注入 bwrap 前缀（Linux/WSL2） |
-| `createPowerShellTool(root, { operations })` | 覆盖 pwsh，`operations.exec` 接 winacl（Windows） |
-| `pi.on("tool_call")` | 命令/工具门控（block + reason） |
-| `pi.on("before_agent_start")` | system prompt / notice 注入 |
-| `pi.appendEntry` + 纯折叠 | 全局档位持久状态（日志真源，不建内存镜像） |
-| `ctx.ui.select` | 人类批准（升级确认） |
-| `pi.sendMessage` | 即时告知（升级结果 / 档位变化） |
-
-## 4. 架构（packages/*）
+## 0. dsh 沙箱全链路（源码实证）
 
 ```
-packages/bridge   契约 + 共享纯函数：SandboxMode / WIDER_MODES / 严格更宽 / denial+hint 标记 / fail-closed 判定
-packages/sandbox  OS 写面沙箱库：bwrap(Linux/WSL2) / winacl(Windows, pwsh, win32/ FFI 子包 + Node runner)
-packages/core     唯一 pi 扩展宿主：全局档位折叠、bash/pwsh 工具注入、escalation 解析 + 批准、fail-closed
+tool-bash (模型面)            sandbox-policy                escalation.ts
+  ├ 加 sandbox_permissions      ├ resolve():               ├ WIDER_MODES
+  │   + justification 参数      │   explicit > session     ├ approveEscalation
+  ├ approveBashEscalation ────► │   > default              ├ sandboxDenialMarker /
+  ├ resolveSandboxPolicy        ├ session sandbox/mode     │   escalationHintMarker
+  └ render (denial+hint)        │  → sys prompt 段         └ validateEscalationArgs
+        │
+        ▼
+bash-sandbox (executor)         sandbox-local (provider)
+  ├ run/start: confine()         ├ selectRunner: platform chain
+  ├ classifyDenial/              │   linux: bwrap→landlock; win32: windows-acl
+  │   classifyRunnerFailure     ├ confine() → 包装 argv
+  └ result.sandbox{denied,       └ ACL grants (win): standing workspace
+      enforcement, runnerFailed}     + revocable session temp
+        │
+        ▼
+后端: bwrap(--ro-bind / / + 按档 --bind 工作区 / tmpfs /tmp)
+      winacl(WRITE_RESTRICTED token + NTFS ACE capability SID)
 ```
 
-- 根 `index.ts` → 包根 re-export（`packages/core/src/index.ts`）。
-- `pi.extensions` → 仅 core；sandbox/bridge 作为库被 core import（`BashSpawnHook` 同步约束 → 沙箱作为库、被 mode import，非独立扩展）。
+## 1. 模型面 tool（`@deepseek-ai/dsh-tool-bash`）
 
-## 5. 档位与批准（落地形态）
+### dsh 语义
+- `parameters` 仅在存在沙箱 executor 时追加：
+  ```ts
+  sandbox_permissions: { type:'string', enum: ESCALATION_TARGETS }  // ['workspace-write','danger-full-access']
+  justification: { type:'string' }  // 与 sandbox_permissions 必须同带、非空句
+  ```
+- `description` 加入升级指引：denied → 同一回合用 `sandbox_permissions + justification` 重试精确同一条命令；不绕道聊天；拒绝即定论。
+- `execute`：先 `resolveSandboxPolicy`（session 模式 > 默认）；若带升级参数 → `approveBashEscalation` → `approveEscalation`（严格更宽 + 审批）→ 得到 approved mode → **只对本次调用**以更宽 policy 执行。
+- `output.render`：denied 时在结果末尾追加 `[sandbox: file access denied under <mode> mode]` + `[sandbox: escalation available — retry …]`。
 
-### 5.1 全局档
-- 默认 `read-only`；持久状态经 `appendEntry`（事件折回），`session_start` 恢复。
-- 档位是会话的全局写面策略，不随任何阶段切换。
-
-### 5.2 写面拦截 + 升级
-- bash/pwsh 工具接到命令 → 按当前全局档构造 `SandboxExecutionPolicy` → 后端 `confine`/`spawnHook`/`operations.exec`。
-- **写被拒**（后端报 EROFS/EACCES 或预判写面）→ 返回 `{ block, reason: denialMarker + escalationHintMarker }`，模型看到标记。
-- **模型升级**：调用带 `sandbox_permissions`（目标档）+ `justification` → core 解析：
-  - 校验严格更宽（`WIDER_MODES[effectiveMode].includes(target)`）→ 非更宽直接拒绝（不弹窗）；
-  - 走 `ctx.ui.select`（展示 justification）→ `allowed-once` → **仅本次调用**以目标档执行；`rejected`/cancelled → 拒绝。
-- **升级只作用于本次调用**，不改全局档 → 不留持久更宽（不变量 5）。
-
-### 5.3 fail-closed
-- confined 档（read-only / workspace-write）但后端不可用（`probe()` 失败 / 加载失败 / koffi 载入失败）→ 抛 `SANDBOX_UNAVAILABLE`，拒绝裸跑。
-- 模型若确需全权 → 显式切 `danger-full-access`（这本身也是一次升级，走批准）。
-
-## 6. 后端
-
-| 平台 | 后端 | shell | 写面实现 |
+### 三段式 → pi 落地
+| 维度 | pi 原生 | dsh 语义 | pi 裁剪 |
 |---|---|---|---|
-| Linux / WSL2 | bwrap | bash | `spawnHook` 注入：`--ro-bind / /`（写基座）+ 工作区 `--ro-bind`/`--bind`（按档）+ `/tmp` tmpfs |
-| Windows | winacl | pwsh | `WRITE_RESTRICTED` token + NTFS ACE 写白名单 / deny-read（敏感目录）；`operations.exec` 经 Node runner |
+| 工具 schema 加升级字段 | 重注册 bash 工具，扩展 `parameters`（typebox） | 传入 `sandbox_permissions`(enum)+`justification` | 复用 pi 的 bash 工具对象，`parameters` 里**追加**这两个字段；无沙箱 executor 时**不追加**（不广告） |
+| 批准 | `ctx.ui.select` | `approveEscalation`（严格更宽 + 人类确认） | 拦截 upgrade 参数 → 校验严格更宽 → `ctx.ui.select`（展示 justification）→ allowed-once=本次更宽 / rejected=拒绝 |
+| denial 渲染 | pi bash 工具结果是文本 | 结果尾部追加 `[sandbox: …]` 标记 | **覆写 bash `execute`**：跑完后若输出匹配 denial 方言（bwrap EROFS / winacl "Access is denied"），向 content 追加 `denialMarker + escalationHintMarker` |
+| 只作用于本次调用 | — | allowed-once → per-call wider | 批准的更宽 mode 只并入本次 policy，**不改全局档** |
 
-- `selectBackend()` 按平台选；`probe()` 失败 → fail-closed。
-- **winacl 由独立 Node runner 子进程承载**（Bun 宿主不能加载 koffi）；加载前 fail-closed 降级。
+**实现要点**：
+```ts
+// 重新注册 bash 工具，保留原 schema 语义并加升级字段（无沙箱时字段不出现）
+pi.registerTool({
+  ...baseBashTool,
+  parameters: { ...baseBashTool.parameters, ...(escalationAdvertised ? {
+    sandbox_permissions: {...}, justification: {...},
+  } : {}) },
+  execute: async (id, params, signal, onUpdate) => {
+    const standing = resolvePolicy(session)
+    let mode = standing.mode
+    if (params.sandbox_permissions && params.justification) {
+      mode = await approveEscalation({ requestedMode, justification, effectiveMode: mode, subject:'command' },
+                                     { approver: ui.select, agent, callId, toolName:'bash', signal })
+    }
+    const result = await baseBashTool.execute(id, {...params}, signal, onUpdate)
+    if (mode !== 'danger-full-access' && looksLikeDenial(result)) {
+      return appendMarkers(result, mode)   // denial + hint
+    }
+    return result
+  },
+})
+```
+其中 `looksLikeDenial(result)` 匹配当前后端的 `denialSignatures`（bwrap `read-only file system`；winacl `access is denied`/`permission denied`/…）。
 
-## 7. 设计不变量（摘要，详见根 AGENTS.md）
+## 2. executor 层（`@deepseek-ai/dsh-bash-sandbox`）
+- `run/start`：`danger-full-access` → 原样执行；否则 `confine(['bash','-c',cmd], policy)`（provider 包装 argv）。
+- 分类：`classifyRunnerFailure`（runner 自身失败 → `SANDBOX_UNAVAILABLE`，命令没跑）、`classifyDenial`（stderr 匹配 denial 方言 → `denied:true`）、`enforcement`。
+- 结果携带 `sandbox: { mode, denied, enforcement, runnerFailed }`。
 
-1. 沙箱管写面不含读面；读全开。
-2. 档位全局持续，无阶段绑定、无子档。
-3. 批准 = 逐级升级（严格更宽），禁用命令白名单。
-4. fail-closed（无后端→ SANDBOX_UNAVAILABLE；非更宽→不弹窗）。
-5. 批准不进模型上下文；升级仅 per-call，不留持久更宽。
-6. 状态 = 日志折叠，禁双源。
-7. 敏感路径凭"写面 + 出口"约束，不做 deny-read 名单。
+**三段式 → pi**：pi 在 `createBashTool` 的 `spawnHook` 里改**命令字符串**（`bwrap <profile> -- sh -c '<cmd>'`）；winacl 走 `operations.exec`。**不新增 executor**，分类逻辑并入上图 execute 的探针。
 
-## 8. 已知取舍
+## 3. provider 层（`@deepseek-ai/dsh-sandbox-local`）
+- `PLATFORM_CHAINS = { linux:['bwrap','landlock'], darwin:['seatbelt'], win32:['windows-acl'] }`。
+- `confine(argv, policy)` → 选 runner + profile → 返回包装 argv + enforcement + denial 方言 + runner-failure 规则。
+- platform 无可用 runner → `SandboxUnavailableError`（fail-closed）。
+- ACL grant 生命周期（win）：工作区 SID 确定性、ACE **stand（跨会话复用缓存，exact-ACE skip O(1)）**；每会话**随机 temp 目录 + SID**，dispose 撤销；provider dispose 清 temp、保工作区站台 ACE。
 
-- 计划性工作流不在本扩展内，交由独立扩展承担。
-- winacl `partial`；Windows shell=pwsh；koffi 依赖 Node runner；网络不掺和（dsh "outside vocabulary"）；devDep ≥0.84.4。
+**三段式 → pi**：`selectBackend()`（bwrap/winacl）+ `probe()`；`createBashTool` spawnHook 用 bwrapProfile、`createPowerShellTool` operations 用 winacl Node runner。**provider 承载 grant 生命周期**（winacl 由 Node runner 子进程承载，Bun 宿主不 load koffi）。
+
+## 4. policy 层（`@deepseek-ai/dsh-sandbox-policy`）
+- `resolve({session, mode})`：`mode`（显式批准）> 会话最近 `sandbox/mode` 事件 > 部署默认；`workspaceRoot` = 会话 cwd > 配置 root。返回 `SandboxExecutionPolicy`（含 `sessionId`）。
+- 会话 override 以**日志事件**持久化（`sandbox/mode`），折回 session-projection。
+- 注入系统提示段 `sandbox:policy`：按 mode 渲染对模型的指引（read-only / workspace-write / danger-full-access 各自文案）。
+
+**三段式 → pi**：
+- 全局档 = `appendEntry` 折叠（日志真源，不建内存镜像）。默认 `read-only`（fail-safe）。
+- 提供 `/sandbox <mode>` 命令 + `session_start` 恢复；persist 走 appendEntry（不建内存真源，不变量 6）。
+- `before_agent_start` 注入 **当前档位 + 升级规则** 系统提示段（不变量 8）。
+
+## 5. escalation 词表（`@deepseek-ai/dsh-sandbox/escalation.ts`）
+```ts
+WIDER_MODES = { 'read-only':['workspace-write','danger-full-access'], 'workspace-write':['danger-full-access'] }
+approveEscalation(req, approval):
+   1. requested ∈ WIDER_MODES[effective] ?（否则抛错，不弹窗）
+   2. approver/agent 缺失 → fail-closed
+   3. approver.request({ reason: `escalate sandbox to ${mode}: ${justification}`, ... })
+   4. allowed-once→mode / rejected/cancelled/unavailable→抛文本
+sandboxDenialMarker(mode) = `[sandbox: file access denied under ${mode} mode]`
+escalationHintMarker(subject) = `[sandbox: escalation available — retry this exact ${subject} once with sandbox_permissions (…) + justification; …]`
+validateEscalationArgs(sp, j) = 必须同带 + j 非空句
+```
+**三段式 → pi**：纯函数原样落地（bridge 包）。`approveEscalation` 的 `approver` 换 `ctx.ui.select`；`subject='command'`。
+
+## 6. 后端（bwrap / winacl）
+
+### 6.1 Linux/WSL2 bwrap（`profiles.ts`）
+```ts
+['--ro-bind','/','/','--dev','/dev','--unshare-pid','--proc','/proc','--die-with-parent']
+workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot]
+```
+- read-only：整树只读可读，无写挂载 → 写全拒、读全开。
+- workspace-write：工作区 + `/tmp` 可写，其余只读。
+- **无 `--unshare-net`、无敏感路径掩码**（读全开、网络共享）。
+- 第 2 候选 landlock 仅作 bwrap 不可用时的后备。
+
+### 6.2 Windows winacl（`sandbox-windows-acl`）
+- **受限令牌**：`CreateRestrictedToken(WRITE_RESTRICTED|LUA_TOKEN|DISABLE_MAX_PRIVILEGE)` + restricting-SID 列表；read-only=`[logon SID, EVERYONE]`，workspace-write=加 workspace SID + temp SID；剔除 Authenticated Users / INTERACTIVE / LOCAL（防 CIM、`C:\` 根树、Public 树逃逸）。
+- **NTFS ACE 写白名单**：工作区确定性 SID（`workspaceWriteSid`）+ 每会话随机 temp SID（`tempWriteSid`）；Windows 权限**两次检查**（普通 SID + restricting SID），只允许列表 SID 写。
+- **runner 子进程**（`runner.ts`）：`[node, runner, --workspace, d, --temp, d, --mode, m, [--write-sid, ...], '--', cmd]`；stdin/stdout 直通、镜像退出码、改写 TMP/TEMP 到 private-temp、退出撤 temp grant；失败→`windows-acl-run:`+exit 127，绝不裸 spawn。
+- **enforcement=partial**（Everyone 保留 / NTFS 硬链接 / 同身份读限制）。
+
+**三段式 → pi**：落地 dsh 的 win32 后端（受限令牌 + NTFS ACE + Node runner），**只限写**（不含 deny-read / 凭据掩码）；无 plan/verify 档位。
+
+## 7. 复现的功能清单（dsh → pi-sandbox-dsh）
+
+| # | dsh 功能 | pi 落地 | 三段式 |
+|---|---|---|---|
+| 1 | 全局档位（read-only/workspace-write/danger + 默认） | 全局档 = appendEntry 折叠 + `/sandbox` 命令 | 原生(折叠)+dsh(3档有效默认)+裁剪(无plan档) |
+| 2 | 档位解析（explicit>session>default；root=cwd） | `resolvePolicy(session)` 纯函数 | 同 dsh |
+| 3 | 命令写面收敛（confine） | spawnHook(bwrap) / operations.exec(winacl) | 原生工具钩子 + dsh 后端 |
+| 4 | 写被拒 → denial marker + hint | execute 覆写探测 denial 方言 → 追加标记 | 原生(文本结果)+dsh(标记) |
+| 5 | 模型升级（sandbox_permissions+justification） | bash 工具 schema 追加字段 | 原生(工具schema)+dsh(参数) |
+| 6 | 批准（approveEscalation） | `ctx.ui.select` + 严格更宽校验 | 原生(ui.select)+dsh(词表) |
+| 7 | per-call 更宽（不持久） | 批准的 mode 只并入本次 policy | 同 dsh |
+| 8 | fail-closed（SANDBOX_UNAVAILABLE） | 后端不可用 → 拒绝（block）| 原生(block)+dsh(降级为拒绝) |
+| 9 | 系统提示档位段 | before_agent_start 追加 | 原生 + dsh(renderPolicyContext) |
+| 10 | 后端（bwrap/winacl，只限写） | 复用骨架，**去掉凭据隐藏/plan档** | 原生 + dsh(读全开/网络) |
+
+## 7. plan-mode 与沙箱正交（解耦依据）
+
+**dsh 的 plan-mode 与沙箱正交、解耦**（源码实证）：
+
+- `plan-mode`（`packages/plan/plan-mode/`）只管**工作流软引导**：`plan:policy` 提示段 + `/plan` + `exit_plan_mode` 工具 + `plan/mode` 布尔事件，**不限制任何工具**（"every tool stays callable"），**不改变沙箱档**。
+- `sandbox`（`packages/sandbox/sandbox*/`）管**写面强制执行**：全局档（read-only/workspace-write/danger）+ 逐级升级批准，**独立于相位**。
+- 两者在系统提示里**并存**（`plan:policy` 与 `sandbox:policy` 各自注册，互不依赖）；README 的关系只是一句建议（plan 软引导，需强制限制就去配 sandbox），**不是耦合**。
+
+**结论**：pi-sandbox-dsh **不含 plan-mode**——沙箱管写、计划管工作流，两者是**正交两层**。将来若做计划工作流扩展（如 opencode 版），应做成**独立的软引导层**，与本沙箱**解耦共存**，绝不焊成"相位开关沙箱"。
+
+## 8. 模式持久化（session-mode）与 fs 侧围栏（待实现）
+
+**模式写路径（对齐 dsh `session-mode.ts`）**：全局档 = 只追加一条 log-only `sandbox/mode` 事件；`effective = 折叠态 ?? 部署默认`。存活靠会话重放，无外部配置 store，不建内存真源（不变量 6）。pi 落点：`appendEntry("sandbox/mode", { mode })` + 纯折叠；`/sandbox <mode>` 命令走此写路径。
+
+**fs 侧（dsh `fs-sandbox` + `tool-fs`，最小复现）**：除 bash 外，**文件工具（edit/write）也要写面受限**——dsh 用**进程内路径围栏**（`isPathUnder`：词法快路径判断 target 是否在可写根内，不匹配时用文件系统身份兜底，识别 Windows 8.3/大小写别名）配合 fs-tool 的 escalation/denial。pi 落点：`edit`/`write` 工具的 execute 前置 `isPathUnder(target, workspaceRoot)` 判可写 + 升级提示。
 
 ## 9. 验证
 
 - `npm run typecheck`（strict）。
-- `npm test`：档位折叠 / 严格更宽 / escalation 批准流（allowed-once / rejected / cancelled / unavailable / 非更宽不弹窗）/ fail-closed / denial+hint 标记 / `selectBackend` / bwrap / winacl 签名。
-- `npm run probe`：bwrap `--version`；winacl pwsh-under-token + read-only 往返 + dispose 撤销。
+- `npm test`：pure（bridge）——`WIDER_MODES` 严格更宽 / `approveEscalation` 各结果 / `validateEscalationArgs` / `resolvePolicy` 优先级 / `sandboxDenialMarker`/`escalationHintMarker` / backlog denial 探测；`selectBackend` / bwrap / winacl 签名。
+- `npm run probe`：`bwrap --version`；winacl pwsh-under-token + read-only 往返 + dispose 撤销。
