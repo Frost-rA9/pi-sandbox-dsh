@@ -114,7 +114,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       updateSandboxBadge(ctx.ui);
       pi.appendEntry(SANDBOX_MODE_ENTRY, { mode });
       pi.sendMessage(
-        { customType: `${SANDBOX_MODE_ENTRY}:notice`, content: `沙箱档位已切换: ${prev} → ${mode}`, display: true },
+        { customType: `${SANDBOX_MODE_ENTRY}:notice`, content: `The user switched the sandbox mode: ${prev} → ${mode}`, display: true },
         { deliverAs: "steer" },
       );
     },

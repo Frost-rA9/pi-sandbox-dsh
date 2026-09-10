@@ -22,6 +22,7 @@ const tools: Record<string, unknown>[] = [];
 const commands: Record<string, unknown> = {};
 const handlers: Record<string, (...a: unknown[]) => unknown> = {};
 const messages: unknown[] = [];
+const sent: { message: unknown; options: unknown }[] = [];
 const entries: unknown[] = [];
 
 const pi = {
@@ -29,7 +30,7 @@ const pi = {
   registerCommand: (name: string, spec: unknown) => { commands[name] = spec; },
   registerFlag: () => {},
   on: (name: string, h: (...a: unknown[]) => unknown) => { handlers[name] = h; },
-  sendMessage: (m: unknown) => { messages.push(m); },
+  sendMessage: (m: unknown, o?: unknown) => { messages.push(m); sent.push({ message: m, options: o }); },
   appendEntry: (type: string, data: unknown) => { entries.push({ type, data }); },
   setActiveTools: () => {},
   getActiveTools: () => [] as string[],
@@ -75,6 +76,36 @@ try {
 } catch (e) {
   failed++;
   console.error(`  ✗ before_agent_start 异常: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("=== 切档 notice：英文文案 + steer 通道 + display ===");
+try {
+  const ui = {
+    theme: { fg: (_c: string, t: string) => t },
+    setStatus: () => {},
+    select: async () => "切换",
+  };
+  const handler = (commands["sandbox"] as { handler: (args: string, ctx: unknown) => Promise<void> }).handler;
+  const before = sent.length;
+  await handler("danger-full-access", { ui }); // 当前折叠档为 workspace-write → 发生切换
+  const notices = sent
+    .slice(before)
+    .filter((x) => (x.message as { customType?: string }).customType === "sandbox-mode:notice");
+  assert(notices.length === 1, "切档 → 恰发一条 sandbox-mode:notice");
+  const notice = notices[0]!;
+  assert(
+    (notice.message as { content?: string }).content === "The user switched the sandbox mode: workspace-write → danger-full-access",
+    "notice 为英文且带上一次/本次档位",
+  );
+  assert((notice.message as { display?: boolean }).display === true, "notice display: true");
+  assert((notice.options as { deliverAs?: string } | undefined)?.deliverAs === "steer", "notice 走 steer 通道");
+  assert(
+    entries.some((e) => (e as { type?: string; data?: { mode?: string } }).type === "sandbox-mode" && (e as { data?: { mode?: string } }).data?.mode === "danger-full-access"),
+    "切档同时写 sandbox-mode 日志",
+  );
+} catch (e) {
+  failed++;
+  console.error(`  ✗ 切档 notice 异常: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
