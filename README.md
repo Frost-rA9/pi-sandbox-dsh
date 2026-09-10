@@ -43,7 +43,7 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
-See [docs/architecture.md](docs/architecture.md) for the full design, and the local `AGENTS.md` (gitignored) for the design rationale.
+See [docs/architecture.md](docs/architecture.md) for the architecture and [DESIGN.md](DESIGN.md) for the design rationale and known trade-offs.
 
 ## License
 

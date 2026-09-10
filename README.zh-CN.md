@@ -43,7 +43,7 @@
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
-完整设计见 [docs/architecture.md](docs/architecture.md)，设计依据见本地 `AGENTS.md`（gitignored，不入库）。
+架构见 [docs/architecture.md](docs/architecture.md)，设计依据与已知取舍见 [DESIGN.md](DESIGN.md)。
 
 ## 许可证
 
