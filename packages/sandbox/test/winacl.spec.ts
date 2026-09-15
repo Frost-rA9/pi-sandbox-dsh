@@ -26,7 +26,13 @@ assert(typeof winaclUsable() === "boolean", "winaclUsable returns boolean");
 const win = selectBackend("win32");
 assert(win.kind === "winacl", "selectBackend(win32) → winacl");
 assert(win.shellTool === "powershell", "winacl shellTool=powershell");
-assert(win.probe() === false, "probe false on non-win32 host");
+if (process.platform === "win32") {
+  // 真机能力（koffi/令牌/DACL/Job）由 `npm run probe` 验证 —— 单元测试不拉起 runner 子进程。
+  console.log("  · win32 宿主：probe() 的真机结果见 `npm run probe`");
+  assert(typeof win.info.available === "boolean", "winacl info.available 形状");
+} else {
+  assert(win.probe() === false, "probe false on non-win32 host");
+}
 const linux = selectBackend("linux");
 assert(linux.kind === "bwrap", "selectBackend(linux) → bwrap");
 

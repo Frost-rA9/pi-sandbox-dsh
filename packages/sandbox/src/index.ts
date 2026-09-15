@@ -23,4 +23,17 @@ export {
 } from "./classify.ts";
 export { isPathUnder, writableRoots } from "./containment.ts";
 export { createWinaclBackend } from "./winacl.ts";
-export { winaclUsable, buildWinaclRunnerArgv, workspaceWriteSid, tempWriteSid, assertTempRootOutsideWorkspace, assertPrivateTempDisjoint } from "./win32/index.ts";
+// 纯函数/契约（无原生依赖）与 winacl 库层分开导出：宿主侧不会因 public 入口而拉起 koffi 图。
+export { buildWinaclRunnerArgv, winaclUsable, type WinaclRunnerSpec } from "./win32/runner-contract.ts";
+export {
+  AclSandbox,
+  AclWriteGrant,
+  assertPrivateTempDisjoint,
+  assertTempRootOutsideWorkspace,
+  tempWriteSid,
+  workspaceWriteSid,
+  type AclSandboxChild,
+  type AclSandboxChildResult,
+  type AclSandboxOptions,
+  type AclSandboxSpawnOptions,
+} from "./win32/index.ts";
