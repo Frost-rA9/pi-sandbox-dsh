@@ -1,6 +1,6 @@
 /**
  * pi-sandbox-dsh-bridge 纯函数测试。
- * 覆盖：档位阶梯（严格更宽）/ denial+hint 标记 / 升级参数配对 / policy 优先级 / denial 探测 / fail-closed。
+ * 覆盖：档位阶梯（严格更宽）/ denial+hint 标记 / 升级参数配对 / policy 优先级 / 结果侧分类 / fail-closed。
  */
 import {
   isSandboxMode,
@@ -13,7 +13,14 @@ import {
   assertStrictlyWider,
   resolveSandboxPolicy,
   renderPolicyContext,
-  looksLikeDenial,
+  DENIAL_SIGNATURES,
+  RUNNER_FAILURE_RULES,
+  WINACL_RUNNER_FAILURE_EXIT,
+  matchesSignature,
+  classifyDenial,
+  classifyRunnerFailure,
+  sandboxRunnerFailureMessage,
+  sandboxWideningHint,
   SANDBOX_MODE_DESCRIPTIONS,
   isConfinedMode,
   SANDBOX_UNAVAILABLE,
@@ -77,11 +84,36 @@ assert(renderPolicyContext({ mode: "read-only", workspaceRoot: "/" }).includes("
 assert(renderPolicyContext({ mode: "workspace-write", workspaceRoot: "/w" }).includes("/w"), "workspace-write context names root");
 assert(renderPolicyContext({ mode: "danger-full-access", workspaceRoot: "/" }).includes("does not restrict file modifications"), "danger context");
 
-console.log("=== 7) denial 探测 ===");
-assert(looksLikeDenial("bwrap", "cp: cannot create regular file 'x': Read-only file system"), "bwrap EROFS detected");
-assert(!looksLikeDenial("bwrap", "hello world"), "bwrap no false positive");
-assert(looksLikeDenial("winacl", "Access to the path 'x' is denied."), "winacl access denied");
+console.log("=== 7) 结果侧分类（denial 方言 / runner 失败 / fail-closed 文案） ===");
+const bwrapDenial = DENIAL_SIGNATURES.bwrap;
+assert(matchesSignature(1, "cp: cannot create regular file 'x': Read-only file system", bwrapDenial), "bwrap EROFS detected (nonzero exit)");
+assert(!matchesSignature(0, "Read-only file system", bwrapDenial), "exit 0 is not a denial");
+assert(!matchesSignature(null, "Read-only file system", bwrapDenial), "signal death is not a denial");
+assert(!matchesSignature(1, "hello world", bwrapDenial), "bwrap no false positive");
+assert(matchesSignature(1, "Access to the path 'x' is denied.", DENIAL_SIGNATURES.winacl), "winacl access denied");
+assert(matchesSignature(1, "Error: EPERM: operation not permitted, open 'x'", DENIAL_SIGNATURES.winacl), "winacl Node EPERM denied");
+assert(matchesSignature(1, "EPERM: OPERATION NOT PERMITTED", DENIAL_SIGNATURES.winacl), "denial matching is case-insensitive");
+assert(classifyDenial(1, "Read-only file system", bwrapDenial), "classifyDenial parity with matchesSignature");
+
+assert(classifyRunnerFailure(1, "bwrap: setting up uid map: Permission denied", RUNNER_FAILURE_RULES.bwrap) === "bwrap: setting up uid map: Permission denied", "bwrap runner failure returns the fatal line");
+assert(classifyRunnerFailure(1, "sh: 1: bwrap: not found", RUNNER_FAILURE_RULES.bwrap) === "sh: 1: bwrap: not found", "missing bwrap on PATH is a runner failure");
+assert(classifyRunnerFailure(0, "bwrap: boom", RUNNER_FAILURE_RULES.bwrap) === undefined, "exit 0 is not a runner failure");
+assert(classifyRunnerFailure(null, "bwrap: boom", RUNNER_FAILURE_RULES.bwrap) === undefined, "signal death is not a runner failure");
+assert(classifyRunnerFailure(1, "bwrap: unrelated", [{ fatalSignatures: [] }]) === undefined, "no signature = no evidence");
+assert(classifyRunnerFailure(1, "bwrap: unrelated", [{ fatalSignatures: ["   "] }]) === undefined, "blank signature is not evidence");
+assert(classifyRunnerFailure(2, "windows-acl-run: boom", RUNNER_FAILURE_RULES.winacl) === undefined, "exit-code gate rejects a non-reserved code");
+assert(classifyRunnerFailure(WINACL_RUNNER_FAILURE_EXIT, "windows-acl-run: boom", RUNNER_FAILURE_RULES.winacl) === "windows-acl-run: boom", "exit-code gate admits the reserved code");
+assert(
+  classifyRunnerFailure(7, "launcher: partial enforcement (older Landlock ABI)\nlauncher: fatal", [
+    { allowedExitCodes: [7], informationalLines: ["launcher: partial enforcement (older Landlock ABI)"], fatalSignatures: ["launcher: "] },
+  ]) === "launcher: fatal",
+  "informational line excluded by exact full-line equality",
+);
 assert(SANDBOX_UNAVAILABLE === "SANDBOX_UNAVAILABLE", "fail-closed code");
+const failureText = sandboxRunnerFailureMessage("read-only", "bwrap: boom");
+assert(failureText.includes("not a policy denial"), "runner-failure text denies being a denial");
+assert(failureText.includes("bwrap: boom"), "runner-failure text carries the fatal line");
+assert(sandboxWideningHint().includes("/sandbox"), "bash widening hint points at the user decision point");
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

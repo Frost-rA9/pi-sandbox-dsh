@@ -179,24 +179,113 @@ export function assertStrictlyWider(request: EscalationRequest): SandboxMode {
   return mode as SandboxMode
 }
 
-/* ------------------------------ 后端 denial 方言 ------------------------------ */
+/* ------------------------------ 结果侧分类（对齐 dsh `sandbox/diagnostics.ts`） ------------------------------ */
 
-/** 各后端在写被拒时在 stderr 产生的（大小写不敏感）子串；消费方据此探测 denial。 */
+/**
+ * 后端声明的一条 runner 失败规则（对齐 dsh `RunnerFailureRule`）。
+ * “runner 失败” = 沙箱设施自己没跑起来/中途死掉，**不是**命令被策略拒绝。
+ */
+export interface RunnerFailureRule {
+  /** 仅这些非零退出码可命中本规则；省略 = 任意非零退出。 */
+  allowedExitCodes?: readonly number[]
+  /** 判定为致命的 stderr 子串（大小写不敏感；空/空白项不算证据）。 */
+  fatalSignatures: readonly string[]
+  /** 先按**整行精确**（大小写不敏感）排除的信息性行（如 Landlock 老 ABI 的部分强制告警）。 */
+  informationalLines?: readonly string[]
+}
+
+/**
+ * 各后端在写被拒时在 stderr 产生的（大小写不敏感）子串。
+ * 消费方只用**本后端**的方言判定，不取跨后端并集（并集会声称某后端从不产生的 denial）。
+ */
 export const DENIAL_SIGNATURES: Record<SandboxBackendKind, readonly string[]> = {
+  // bwrap 只读 bind 上的 EROFS 文本。
   bwrap: ['read-only file system'],
-  winacl: ['access is denied', 'access to the path', 'permission denied'],
+  // pwsh/.NET: "Access to the path '…' is denied."；cmd: "Access is denied."；
+  // Node EACCES: "permission denied"；EPERM: "operation not permitted"（后两项对齐 dsh）。
+  winacl: ['access is denied', 'access to the path', 'permission denied', 'operation not permitted'],
 }
 
-/** 探测一次执行结果（合并 stdout/stderr 文本）是否命中某后端的 denial 方言。 */
-export function looksLikeDenial(backend: SandboxBackendKind, output: string): boolean {
+/** winacl runner 自身失败时的保留退出码（对齐 dsh `WINDOWS_ACL_RUNNER_FAILURE_EXIT`）。 */
+export const WINACL_RUNNER_FAILURE_EXIT = 127
+
+/** winacl runner 自身失败时的 stderr 前缀契约（runner 实现必须遵守）。 */
+export const WINACL_RUNNER_FAILURE_SIGNATURE = 'windows-acl-run: '
+
+/** 各后端的 runner 失败规则（对齐 dsh `RUNNER_FAILURE_RULES`）。 */
+export const RUNNER_FAILURE_RULES: Record<SandboxBackendKind, readonly RunnerFailureRule[]> = {
+  // bwrap 自身诊断均以 `bwrap: ` 开头（含 PATH 缺失时的 `sh: 1: bwrap: not found`）。
+  bwrap: [{ fatalSignatures: ['bwrap: '] }],
+  winacl: [{ allowedExitCodes: [WINACL_RUNNER_FAILURE_EXIT], fatalSignatures: [WINACL_RUNNER_FAILURE_SIGNATURE] }],
+}
+
+/**
+ * 非零退出且输出命中任一签名（大小写不敏感）→ true。
+ * `exitCode === null`（signal 死亡）不算——被信号杀掉不是 denial。
+ * 对齐 dsh `matchesSignature`。
+ */
+export function matchesSignature(exitCode: number | null, output: string, signatures: readonly string[]): boolean {
+  if (exitCode === null || exitCode === 0) return false
   const lowered = output.toLowerCase()
-  return DENIAL_SIGNATURES[backend].some((sig) => lowered.includes(sig.toLowerCase()))
+  return signatures.some((sig) => lowered.includes(sig.toLowerCase()))
 }
 
-/* ------------------------------ fail-closed ------------------------------ */
+/** 写被拒探测：非零退出 + 本后端 denial 方言。对齐 dsh `classifyDenial`。 */
+export function classifyDenial(exitCode: number | null, output: string, signatures: readonly string[]): boolean {
+  return matchesSignature(exitCode, output, signatures)
+}
+
+/**
+ * 按后端规则判定 runner 自身失败。
+ * 每条规则需：非零退出（且命中 `allowedExitCodes`，若有）+ 排除信息性整行后命中一条致命子串。
+ * @returns 命中的原始 fatal 行（给基础设施错误做 detail），未命中返回 undefined。
+ * 对齐 dsh `classifyRunnerFailure`。
+ */
+export function classifyRunnerFailure(
+  exitCode: number | null,
+  output: string,
+  rules: readonly RunnerFailureRule[],
+): string | undefined {
+  if (exitCode === null || exitCode === 0) return undefined
+  const lines = output.split(/\r?\n/)
+  for (const rule of rules) {
+    if (rule.allowedExitCodes !== undefined && !rule.allowedExitCodes.includes(exitCode)) continue
+    const informational = new Set((rule.informationalLines ?? []).map((line) => line.toLowerCase()))
+    const fatal = rule.fatalSignatures.filter((sig) => sig.trim().length > 0).map((sig) => sig.toLowerCase())
+    for (const line of lines) {
+      const lowered = line.toLowerCase()
+      if (informational.has(lowered)) continue
+      if (fatal.some((sig) => lowered.includes(sig))) return line
+    }
+  }
+  return undefined
+}
+
+/* ------------------------------ fail-closed 文案 ------------------------------ */
 
 /** confined 档请求但无可用后端时的错误码（对齐 dsh SANDBOX_UNAVAILABLE）。 */
 export const SANDBOX_UNAVAILABLE = 'SANDBOX_UNAVAILABLE'
+
+/**
+ * runner 自身失败时的 fail-closed 文案：明确“这不是策略拒绝”且“不降级裸跑”。
+ * 对齐 dsh `SandboxUnavailableError` 的“refusing to run unconfined”立场。
+ * @param mode - 失败时实际生效的 confined 档。
+ * @param detail - 命中的 fatal 原始行（可选）。
+ */
+export function sandboxRunnerFailureMessage(mode: SandboxMode, detail?: string): string {
+  return `sandbox runner failed under "${mode}" mode — this is not a policy denial and the command did not run confined; refusing to retry it unconfined. Repair the sandbox backend or ask the user to switch mode explicitly.`
+    + (detail === undefined ? '' : ` Runner failure: ${detail}`)
+}
+
+/**
+ * bash 的切档提示（pi 裁剪）：pi 的 bash schema 无 `sandbox_permissions`/`justification`，
+ * bash 升级恒为全局 `/sandbox`（见 DESIGN 不变量 5）——故提示指向用户决策点。
+ */
+export function sandboxWideningHint(): string {
+  return '[sandbox: if this write is required, ask the user to widen the mode (/sandbox <wider mode>) — this shell tool has no per-call escalation parameters]'
+}
+
+/* ------------------------------ 后端信息 ------------------------------ */
 
 /** 后端信息：种类 + 可用性 + 沙箱 shell。 */
 export interface SandboxBackendInfo {
