@@ -78,6 +78,27 @@ try {
   console.error(`  ✗ before_agent_start 异常: ${e instanceof Error ? e.message : String(e)}`);
 }
 
+console.log("=== 结果侧分类：注册的 bash 工具端到端 ===");
+// 此时折叠档为 workspace-write；写工作区（/tmp）成功，写根目录被只读基座拒 → 应拿到 denial 标记。
+if (bwrap) {
+  const tool = bashTool as unknown as {
+    execute: (id: string, args: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<unknown>;
+  };
+  const execCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "load-spec", getSessionFile: () => undefined } };
+  const target = `/dsh-load-spec-${process.pid}.txt`;
+  let message = "";
+  try {
+    await tool.execute("tool-call", { command: `echo hi > ${target}` }, undefined, undefined, execCtx);
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  assert(message.includes("[sandbox: file access denied under workspace-write mode]"), "registered bash tool surfaces the denial marker");
+  assert(message.includes("/sandbox"), "registered bash tool surfaces the widening hint");
+  assert(message.includes("Read-only file system"), "marker rides a real EROFS failure");
+} else {
+  console.log("  (bwrap 不可用：跳过分类端到端)");
+}
+
 console.log("=== 切档 notice：英文文案 + steer 通道 + display ===");
 try {
   const ui = {

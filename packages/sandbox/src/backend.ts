@@ -5,7 +5,10 @@
  * 被 core import（pi `BashSpawnHook` 同步约束 → 沙箱不能做成独立扩展）。
  */
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
-import type { SandboxBackendInfo, SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
+import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import type { RunnerFailureRule, SandboxBackendInfo, SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
+import { RUNNER_FAILURE_RULES } from "pi-sandbox-dsh-bridge";
+import { createConfinedOperations, resolveRunFacts } from "./classify.ts";
 import { buildBwrapCommand, probeBwrap } from "./bwrap.ts";
 import { createWinaclBackend } from "./winacl.ts";
 
@@ -41,6 +44,8 @@ export interface SandboxBackend {
   readonly info: SandboxBackendInfo;
   readonly kind: "bwrap" | "winacl";
   readonly shellTool: "bash" | "powershell";
+  /** 本后端的 runner 失败规则（结果侧分类用；danger 档不适用）。 */
+  readonly runnerFailureRules: readonly RunnerFailureRule[];
   probe(): boolean;
   createToolOptions(ctx: BackendContext): BashToolOptions;
 }
@@ -48,6 +53,7 @@ export interface SandboxBackend {
 class BwrapBackend implements SandboxBackend {
   readonly kind = "bwrap" as const;
   readonly shellTool = "bash" as const;
+  readonly runnerFailureRules = RUNNER_FAILURE_RULES.bwrap;
   readonly info: SandboxBackendInfo = { kind: "bwrap", available: false, shellTool: "bash" };
 
   probe(): boolean {
@@ -57,6 +63,7 @@ class BwrapBackend implements SandboxBackend {
 
   createToolOptions(ctx: BackendContext): BashToolOptions {
     return {
+      // argv 收敛：把命令包成 `bwrap … sh -c '<cmd>'`（由 pi 在 exec 前应用）。
       spawnHook: ({ command, cwd }) => {
         const policy = ctx.readState(cwd);
         const env = sandboxEnv(); // 保留 PATH/HOME/代理等，工具可用且不泄漏密钥
@@ -66,6 +73,8 @@ class BwrapBackend implements SandboxBackend {
         const wrapped = buildBwrapCommand(command, policy);
         return { command: wrapped, cwd, env };
       },
+      // 结果侧分类：runner 失败 → fail-closed；denial → 追模型可见标记。
+      operations: createConfinedOperations(createLocalBashOperations(), resolveRunFacts(ctx, "bwrap")),
     };
   }
 }

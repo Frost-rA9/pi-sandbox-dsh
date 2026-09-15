@@ -15,6 +15,12 @@ export {
   type SandboxBackend,
   type BackendContext,
 } from "./backend.ts";
+export {
+  createConfinedOperations,
+  resolveRunFacts,
+  MAX_CLASSIFY_BYTES,
+  type ConfinedRunFacts,
+} from "./classify.ts";
 export { isPathUnder, writableRoots } from "./containment.ts";
 export { createWinaclBackend } from "./winacl.ts";
 export { winaclUsable, buildWinaclRunnerArgv, workspaceWriteSid, tempWriteSid, assertTempRootOutsideWorkspace, assertPrivateTempDisjoint } from "./win32/index.ts";

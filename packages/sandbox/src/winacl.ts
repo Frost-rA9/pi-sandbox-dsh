@@ -12,13 +12,19 @@
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
-import type { SandboxBackendInfo } from "pi-sandbox-dsh-bridge";
+import type { BashOperations, BashToolOptions } from "@earendil-works/pi-coding-agent";
+import { createLocalPowerShellOperations } from "@earendil-works/pi-coding-agent";
+import type { RunnerFailureRule, SandboxBackendInfo } from "pi-sandbox-dsh-bridge";
+import { RUNNER_FAILURE_RULES } from "pi-sandbox-dsh-bridge";
 import type { SandboxBackend, BackendContext } from "./backend.ts";
+import { createConfinedOperations, resolveRunFacts } from "./classify.ts";
 import { buildWinaclRunnerArgv, winaclUsable } from "./win32/index.ts";
 
 const WINACL_DIR = dirname(fileURLToPath(import.meta.url));
 const RUNNER_PATH = resolve(WINACL_DIR, "win32", "runner.ts");
+
+/** danger 档（本后端不参与）时的回落执行器：pi 本地 pwsh。 */
+const localPowerShellOperations: BashOperations = createLocalPowerShellOperations();
 
 /** probe（同步）：非 win32 或 runner `--probe` 非零 → 不可用（fail-closed）。 */
 function runProbe(): boolean {
@@ -34,6 +40,7 @@ function runProbe(): boolean {
 class WinaclBackend implements SandboxBackend {
   readonly kind = "winacl" as const;
   readonly shellTool = "powershell" as const;
+  readonly runnerFailureRules: readonly RunnerFailureRule[] = RUNNER_FAILURE_RULES.winacl;
   info: SandboxBackendInfo = { kind: "winacl", available: false, shellTool: "powershell" };
 
   probe(): boolean {
@@ -42,25 +49,28 @@ class WinaclBackend implements SandboxBackend {
   }
 
   createToolOptions(ctx: BackendContext): BashToolOptions {
-    // winacl：用 createPowerShellTool + operations.exec，把命令交给 Node runner（受限令牌执行）。
-    return {
-      operations: {
-        exec: async (command, cwd) => {
-          if (!winaclUsable()) {
-            throw new Error(`sandbox mode "${ctx.readState(cwd).mode}" is requested but winacl backend is unusable on this host; refusing to run unconfined`);
-          }
-          // 构造 runner 调用（Windows-only 真机执行）；本机仅结构校验。
-          const mode = ctx.readState(cwd).mode;
-          const wrapped = buildWinaclRunnerArgv({
-            workspace: ctx.workspaceRoot,
-            temp: process.env.TEMP ?? process.env.TMP ?? "",
-            mode: mode === "workspace-write" ? "workspace-write" : "read-only",
-            runnerEntry: RUNNER_PATH,
-          });
-          return invokeRunner(wrapped, command, cwd);
-        },
+    // winacl：命令交给 Node runner（受限令牌执行）；结果侧分类（runner 失败 / denial）包在同一缝上。
+    const base: BashOperations = {
+      exec: async (command, cwd, options) => {
+        const mode = ctx.readState(cwd).mode;
+        // danger-full-access：本后端不参与（对齐 dsh「provider 不被咨询」）→ 交回 pi 本地 pwsh。
+        if (mode === "danger-full-access") {
+          return localPowerShellOperations.exec(command, cwd, options);
+        }
+        if (!winaclUsable()) {
+          throw new Error(`sandbox mode "${mode}" is requested but winacl backend is unusable on this host; refusing to run unconfined`);
+        }
+        // 构造 runner 调用（Windows-only 真机执行）；本机仅结构校验。
+        const wrapped = buildWinaclRunnerArgv({
+          workspace: ctx.workspaceRoot,
+          temp: process.env.TEMP ?? process.env.TMP ?? "",
+          mode: mode === "workspace-write" ? "workspace-write" : "read-only",
+          runnerEntry: RUNNER_PATH,
+        });
+        return invokeRunner(wrapped, command, cwd);
       },
     };
+    return { operations: createConfinedOperations(base, resolveRunFacts(ctx, "winacl")) };
   }
 }
 
