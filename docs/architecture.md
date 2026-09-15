@@ -116,7 +116,9 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 - **受限令牌**：`CreateRestrictedToken(WRITE_RESTRICTED|LUA_TOKEN|DISABLE_MAX_PRIVILEGE)` + restricting-SID 列表；read-only=`[logon SID, EVERYONE]`，workspace-write=加 workspace SID + temp SID；剔除 Authenticated Users / INTERACTIVE / LOCAL（防 CIM、`C:\` 根树、Public 树逃逸）。
 - **NTFS ACE 写白名单**：工作区确定性 SID（`workspaceWriteSid`）+ 每会话随机 temp SID（`tempWriteSid`）；Windows 权限**两次检查**（普通 SID + restricting SID），只允许列表 SID 写。
 - **runner 子进程**（`runner.ts`）：`[node, runner, --workspace, d, --temp, d, --mode, m, [--write-sid, ...], '--', cmd]`；stdin/stdout 直通、镜像退出码、改写 TMP/TEMP 到 private-temp、退出撤 temp grant；失败→`windows-acl-run:`+exit 127，绝不裸 spawn。
-- **enforcement=partial**（Everyone 保留 / NTFS 硬链接 / 同身份读限制）。
+- **enforcement=partial**（Everyone 保留 / NTFS 硬链接 / 同身份读限制）；实际受限令牌下 pwsh 跑在 `ConstrainedLanguage`（.NET 方法调用被禁）。
+- **宿主/原生隔离**：pi 宿主是 Bun（不能加载 koffi）→ 宿主只含 `runner-contract.ts`（argv 纯函数）+ `winacl.ts`（spawn 驱动），全部 Win32 逻辑在 runner 子进程；装配期 `runner --probe` 判定可用性（fail-closed）。
+- **grant 归属**：宿主不能物化 ACE → runner 走 standalone 流程（自行派生工作区 SID、建私有 temp 并授予/撤销）；工作区 ACE 幂等保留（standing reuse cache）。
 
 **三段式 → pi**：落地 dsh 的 win32 后端（受限令牌 + NTFS ACE + Node runner），**只限写**（不含 deny-read / 凭据掩码）；无 plan/verify 档位。
 
@@ -168,7 +170,7 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 | bwrap（Linux/WSL2 写面） | ✅ 已实现 + 测试 |
 | 文件工具围栏（`isPathUnder` + 门控被拒即征求批准） | ✅ 已实现 + 测试 |
 | 门控驱动 / `/sandbox`（用户决策点，不 fork 工具） | ✅ 已实现 |
-| **winacl（Windows）后端** | ⏳ **结构已接**（selectBackend→winacl、probe、runner argv、SID 派生、路径边界，均可测）；**令牌/ACE/FFI runner 为 Windows-only，本机无法运行验证，须 Windows 真机 probe** |
+| **winacl（Windows）后端** | ✅ **已接通并 Windows 真机验证**（令牌/ACE/FFI runner 全部落地：`runner --probe`、read-only 写被拒/读全开、workspace-write 工作区内可写/外被拒、ACE 幂等、temp 无残留；证据见 `docs/verify-windows.md`）；已知边界：受限令牌下 pwsh=ConstrainedLanguage、enforcement=partial、每命令一个 runner 子进程 |
 
 **Linux 验证（已完成，真机 bwrap 执行）**：
 - `bwrap-e2e.spec.ts`（真机）：read-only 写工作区→EROFS；read-only 读→成功；workspace-write 写→成功；**无凭据隐藏**（~/.gitconfig 可读）。7/7。
@@ -178,4 +180,4 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 
 - `npm run typecheck`（strict）。
 - `npm test`：pure（bridge）——`WIDER_MODES` 严格更宽 / `approveEscalation` 各结果 / `validateEscalationArgs` / `resolvePolicy` 优先级 / `sandboxDenialMarker`/`escalationHintMarker` / backlog denial 探测；`selectBackend` / bwrap / winacl 签名。
-- `npm run probe`：`bwrap --version`；winacl pwsh-under-token + read-only 往返 + dispose 撤销。
+- `npm run probe`：Linux/WSL2 = `bwrap --version`；Windows = winacl runner capability + read-only/workspace-write 往返 + grant 生命周期（ACE 幂等 + temp 清理）。

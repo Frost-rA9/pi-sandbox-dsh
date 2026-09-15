@@ -92,12 +92,16 @@
 - **denial 只认非零退出**（dsh 同）：命令退出 0 时不判定 denial，即使输出里含方言子串；因此 `… 2>/dev/null || true` 这类吞掉失败的命令不会拿到 denial 标记。
 - **bash 的 denial 提示是"请用户切档"而非 per-call 升级**（dsh 无此分支）：pi 的 bash schema 只有 `command/timeout`，没有 `sandbox_permissions + justification`；bash 升级在本扩展里恒为全局 `/sandbox`（见不变量 5），故提示指向用户决策点，而不是教模型带参重试。
 - **`confine` 不可异步/取消（pi 裁剪）**：pi 的 `spawnHook` 是同步函数，dsh 的 `confine(argv, policy, signal): Promise` 无法直接移植；因此 pi 侧的预备（含 winacl 令牌/ACE）只能在 `operations.exec` 内自己做，本扩展不为它引入取消协议。
-- **winacl runner 失败契约（待 Windows 真机验证）**：runner 自身失败必须打印 `windows-acl-run: ` 并以保留退出码退出，才能被识别为 runner 失败而不是策略拒绝（见 `RUNNER_FAILURE_RULES`）。
+- **winacl runner 失败契约（已 Windows 真机验证）**：runner 自身失败必须打印 `windows-acl-run: ` 并以保留退出码 `127` 退出，才能被识别为 runner 失败而不是策略拒绝（见 `RUNNER_FAILURE_RULES`）。
+- **winacl 在受限令牌下 pwsh = ConstrainedLanguage（真机实测）**：.NET 方法调用被禁，纯 cmdlet / 外部命令不受影响——机制固有代价，非本扩展引入。
+- **winacl 每命令一个 runner 子进程**：宿主（Bun）不能加载 koffi → 不能持有 grant 生命周期，temp grant 按次物化/撤销（工作区 ACE 幂等复用）；净开销 ≈ 80–100 ms/命令。
+- **winacl 超时/中止会绕过清理**：宿主 kill runner 时其 finally 不执行，`%TEMP%` 会留下一个 `pi-sandbox-dsh-*` 私有目录及其 ACE（工作区 standing ACE 不受影响）。
+- **winacl 依赖 PATH 里的系统 `node`**（runner 子进程）；缺 `node`/`koffi` 时 `probe()` 非零 → fail-closed 不可用。
 - **devDep ≥ 0.84.4**（0.84.1 不导出 `createPowerShellTool`）。
 
 ## 八、验证与规模
 
 - `npm run typecheck`（strict，全部 workspace）。
 - `npm test`：core 档位折叠 / 严格更宽判定 / escalate 批准流（allowed-once / rejected / cancelled / unavailable / 非更宽）/ fail-closed / denial+hint 标记；sandbox `selectBackend` / bwrap / winacl 签名 / **结果侧分类**（runner 失败优先、denial 需非零退出、signal 死亡不判定、danger 不判定、分类窗口有界）。
-- `npm run probe`（真机）：bwrap `--version`；winacl `pwsh-under-token` + read-only 往返 + dispose 撤销。
+- `npm run probe`（真机）：Linux/WSL2 = bwrap `--version`；Windows = runner capability（koffi/令牌/默认 DACL/Job）+ read-only 写被拒/读全开 + workspace-write 工作区内可写/工作区外被拒 + 工作区 ACE 幂等（仅 1 条）+ temp 目录无残留。
 - 规模参考：约 3 个包，src 控制在 ~2000 行内（核心小）。

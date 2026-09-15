@@ -1,9 +1,8 @@
-# pi-sandbox-dsh · Windows（winacl）状态与验证指南
+# pi-sandbox-dsh · Windows（winacl）移植与真机验证
 
-> **重要现状**：pi-sandbox-dsh 的 winacl 目前**只有结构**（`selectBackend("win32")→WinaclBackend`、`probe` 调 node runner、`buildWinaclRunnerArgv`、`workspaceWriteSid`/`tempWriteSid`、路径边界），**核心强制执行层尚未移植**：
-> `winacl.ts` 的 `invokeRunner(...)` 目前抛 `"winacl runner not yet wired for local execution"`；
-> `win32/runner.ts` / `token.ts` / `acl.ts` / `ffi.ts` / `grant.ts` / `spawn.ts` / `win32-abi.ts` / `AclSandbox` 均**未写入**。
-> 因此本文件是"**移植清单 + 移植后 Windows 真机验证步骤**"，**不是**"已可用"的说明。
+> **现状**：winacl 强制层**已移植并在 Windows 真机验证通过**（Windows 11 build 26200 + Node v22.23.2 + pwsh）。
+> 本文 = 文件地图 + 宿主/runner 契约 + 真机证据 + 已知边界 + 回归步骤。
+> 单一源 = dsh `packages/sandbox/sandbox-windows-acl`（锚点 `0d1f50007f`）⊕ `packages/subprocess/win32-process`（基础绑定层，已内联）。
 
 ---
 
@@ -18,77 +17,124 @@ Windows 用 **`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单**，shell=
 
 ---
 
-## 1. 移植清单（Windows 强制层，单一源=dsh）
+## 1. 文件地图（`packages/sandbox/src/win32/`）
 
-将 `~/projects/deepseek-harness/packages/sandbox/sandbox-windows-acl/src/` 的关键文件移植到 `pi-sandbox-dsh/packages/sandbox/src/win32/`：
-
-| 文件 | 内容 | 备注 |
+| 文件 | 内容 | 单一源 |
 |---|---|---|
-| `win32-abi.ts` | Win32 常量（token 权限 / SID / EXPLICIT_ACCESS / GRANT_MASK…） | 已有 dsh 源 |
-| `ffi.ts` | koffi 绑定（CreateRestrictedToken / SetEntriesInAclW / SetNamedSecurityInfoW / ConvertStringSidToSidW / CreateFileW / LockFileEx…） | **依赖 dsh 的 `@deepseek-ai/dsh-win32-process` 基础绑定**（extendWin32ProcessBindings / Win32Error / allocPtrSlot / decodePtr…）；需内联或引入等价基础层 |
-| `token.ts` | 受限令牌构建（openCurrentProcessToken / findLogonSid / makeWellKnownSid / createRestrictedToken / setTokenDefaultDaclGrant） | 已读 |
-| `acl.ts` | grant/revoke capability SID（SetEntriesInAclW 合并 + 逐路径 LockFileEx 锁 + exact-ACE skip） | 已读 |
-| `grant.ts` | `AclWriteGrant`（工作区 standing ACE 跨会话复用 / temp 可撤销） | 已读 |
-| `path-boundary.ts` | temp 根/私有 temp 判空 | ✅ 已移植（`pi-sandbox-dsh` 的 `win32/path-boundary.ts`） |
-| `workspace-sid.ts` | S-1-4-x-y / S-1-4-x-y-1 派生 | ✅ 已移植（纯函数，可测） |
-| `spawn.ts` | spawnUnderToken / pipe 直通 / waitForExit / kill-on-close job | |
-| `runner.ts` | argv-prefix wrapper（`--workspace/--temp/--mode/--write-sid/--temp-write-sid/--`） | 已读 |
-| `index.ts` | `AclSandbox`（token + grant + spawn 组装；manageDacls 布尔） | 最大单文件 |
+| `abi.ts` | 通用 Win32 进程/管道/Job 常量 | dsh `win32-process/abi.ts` |
+| `errors.ts` | `Win32Error`（API 名 + 精确错误码） | dsh `win32-process/errors.ts` |
+| `koffi.ts` | koffi 惰性加载（失败不缓存） | dsh `dsh-lazy-require`（内联） |
+| `ffi.ts` | **合并后**的绑定表（通用进程 ⊕ 令牌/ACE）+ 指针/结构辅助 | dsh 两张 `ffi.ts` 合并，去掉 `extendWin32ProcessBindings` 分层 |
+| `process.ts` | `CreateProcessAsUserW` 两种 stdio 形态、kill-on-close Job、管道排空、退出等待、能力探针 | dsh `win32-process/process.ts`（裁剪掉当前令牌 spawn 与 control-stdio） |
+| `win32-abi.ts` | ACL/token 专用常量 | dsh `sandbox-windows-acl/win32-abi.ts` |
+| `token.ts` | 受限令牌构建（logon SID / well-known SID / `CreateRestrictedToken` / 默认 DACL grant） | 同源逐项 |
+| `acl.ts` | DACL 读写：`SetEntriesInAclW` + `SetNamedSecurityInfoW`，per-path `LockFileEx` 串行化，exact-ACE 跳过 | 同源逐项（锁目录名改 `pi-sandbox-dsh-acl-locks`） |
+| `grant.ts` | `AclWriteGrant`（standing/revocable 区分） | 同源逐项 |
+| `spawn.ts` | 受限令牌 spawn 适配 | 同源（去掉 control-pipe） |
+| `acl-sandbox.ts` | `AclSandbox`（token + grant + spawn 组装，`manageDacls` 布尔） | dsh `sandbox-windows-acl/index.ts` |
+| `runner.ts` | argv-prefix 包装器（**pi 侧新增 `--probe`**；去掉 control-pipe） | dsh `sandbox-windows-acl/runner.ts` |
+| `runner-contract.ts` | `winaclUsable` + `buildWinaclRunnerArgv`（**纯函数，宿主专用**，避免宿主 import 到 FFI 图） | pi 侧结构契约 |
+| `path-boundary.ts` / `workspace-sid.ts` | 路径边界 / SID 派生（原有，未改） | 同源逐项 |
+| `../probe.ts` | `npm run probe` 真机探针（**pi 侧新增**） | pi 侧 |
 
-> 移植要点：`runner` 依赖 `AclSandbox`，`AclSandbox` 依赖 token/acl/ffi/spawn/grant/win32-abi，**整套必须一起移植**（无"只移植 runner"的切法）。`ffi.ts` 还依赖 dsh 的 `dsh-win32-process` 基础绑定层，需一并内联或引入等价物。
-
----
-
-## 2. 移植后 · Windows 真机验证步骤
-
-> 前置：Windows 宿主 + pwsh + Node + `koffi` 可加载（`npm install` 允许 koffi 构建脚本）。
-
-### 2.1 后端 probe
-```powershell
-# 直接跑结构验证（win32 后端已接）
-Set-Location C:\...\pi-sandbox-dsh
-npm run typecheck   # strict
-npm test            # 结构测试（selectBackend→winacl / probe / runner-argv / SID 派生）应过
-```
-预期：`selectBackend("win32")` → winacl；`probe()` 调 `node --experimental-strip-types win32/runner.ts --probe` 返回 0。
-
-### 2.2 pwsh-under-token 往返（核心）
-```powershell
-# runner 在受限令牌下跑 pwsh；验证 read-only / workspace-write 往返
-node --experimental-strip-types win32/runner.ts --workspace <ws> --temp <tmp> --mode read-only -- pwsh -c "Set-Content <ws>\x.txt hi"
-```
-- **read-only**：写被拒（`Access to the path ... is denied` / `permission denied`），读成功。
-- **workspace-write**：工作区 + private-temp 内写成功；**工作区外写被拒**。
-- **读不受限**：`read` / `Get-Content` 任意路径成功（**不藏读、无 deny-read**）。
-
-### 2.3 dispose 撤销
-- temp ACE 在 `dispose()` 撤销（不留持久 ACL 残渣）；工作区 standing ACE 保留（跨会话复用缓存）。
-
-### 2.4 enforcement = partial 表现
-- Everyone 保留（外部对象 grant Everyone 写仍可写）；NTFS 硬链接可别名（文档化差异）。进入 readonly/verify 经 notice 明示。
+**宿主（Bun）与原生层彻底隔离**：宿主只 import `runner-contract.ts`（纯函数）与 `winacl.ts`（spawn 驱动），FFI 图只在 Node runner 子进程里被真正执行。
 
 ---
 
-## 3. 已知边界（dsh 文档化，接受）
+## 2. 宿主 ↔ runner 契约
 
-- **只限写**：读 / 网络 / 进程可见性**不**受令牌限制（`WRITE_RESTRICTED` 只交写）。
-- **console isolation**：受限令牌下 share 宿主控制台（`CREATE_NO_WINDOW`/`CREATE_NEW_CONSOLE` 子进程 `STATUS_DLL_INIT_FAILED`）。
+```
+[node, runner.ts, '--workspace', <dir>, '--temp', <dir>, '--mode', <read-only|workspace-write>,
+ ['--write-sid', <S-1-4-…>, '--temp-write-sid', <S-1-4-…>], '--', <argv...>]
+[node, runner.ts, '--probe']
+```
+
+- **grant 归属**：pi 宿主不能物化 ACE（Bun 不能加载 koffi）→ 宿主**从不**传 `--write-sid`/`--temp-write-sid`，
+  runner 走 **standalone 流程**：自行派生工作区 SID → 在 `--temp` 下建随机私有目录并派生 temp SID →
+  授予两项 ACE（工作区 grant 幂等，exact-ACE 命中即跳过整树重传播）→ 子进程退出后撤销 temp ACE 并删目录
+  （工作区 ACE 保留 = dsh 的 standing reuse cache）。seam-managed 分支保留以对齐 dsh 契约（pi 暂不使用）。
+- **失败契约**：runner 侧任何失败打印 `windows-acl-run: <detail>` 并退出 `127`（`WINACL_RUNNER_FAILURE_EXIT`），
+  宿主 `RUNNER_FAILURE_RULES.winacl` 据此判 runner 失败 → `SANDBOX_UNAVAILABLE`，**绝不**降级裸跑。
+- **probe**：宿主扩展装配时同步 `spawnSync('node', [...runner, '--probe'])`，非零 → 后端不可用（fail-closed，不注册 shell 工具）。
+  `--probe` 只做能力探针（koffi 绑定 / 当前令牌 / 受限令牌 / 默认 DACL / kill-on-close Job），不拉起子进程（装配期要快）。
+
+---
+
+## 3. 真机验证结果（本机 Windows 11 26200 / Node v22.23.2）
+
+```powershell
+npm run typecheck   # strict，三 workspace 全过
+npm test            # 52 / 10 / 17 / 23 / 15 / 20 passed，0 failed（bwrap e2e 在 Windows 跳过）
+npm run probe       # 12 passed, 0 failed
+```
+
+`npm run probe` 覆盖并实测通过：
+
+| 检查 | 结果 |
+|---|---|
+| runner `--probe`（koffi/令牌/DACL/Job 能力齐备） | 返回 0 |
+| read-only：写工作区 | 被拒（非零退出 + stderr 命中 `access to the path` 方言），文件确实未创建 |
+| read-only：读工作区外 | 成功（读不受限） |
+| workspace-write：写工作区 | 成功落盘 |
+| workspace-write：写工作区外 | 被拒 |
+| grant 生命周期 | 两次 grant 后工作区仅 **1 条** capability ACE（幂等）；runner 私有 temp 目录无残留 |
+| read-only 不带写能力 | 工作区 standing ACE 保留但不生效 |
+
+`packages/core/test/load.spec.ts` 另有**结果侧分类端到端**：用 mock pi 装配扩展 → 注册的 powershell 工具真跑一条
+confined 命令 → workspace-write 内写成功、外写拿到 `[sandbox: file access denied under workspace-write mode]` +
+切档提示（denial 骑在真实 `.NET` 拒写文案上）。**17 passed, 0 failed**。
+
+**开销实测**（同一台机器，`Write-Output hi` 往返）：
+
+| 路径 | 耗时 |
+|---|---|
+| 裸 pwsh（`-NoProfile -NonInteractive -Command`） | ~0.25 s |
+| confined read-only（含 Node runner 启动 + 令牌 + 默认 DACL + Job） | ~0.34 s |
+| confined workspace-write（+ 私有 temp 目录 + temp grant/revoke） | ~0.33 s |
+| runner `--probe`（装配期一次性） | ~0.10 s |
+
+→ 每命令净开销 ≈ **80–100 ms**（Node 启动 + 令牌构建 + ACE 操作）。
+
+---
+
+## 4. 已知边界（真机观察 + dsh 文档化，接受）
+
+- **只在写面**：读 / 网络 / 进程可见性**不**受令牌限制（`WRITE_RESTRICTED` 只交写）。
+- **enforcement = partial**：Everyone 保留 / NTFS 硬链接可别名 / 同身份读限制（dsh 文档化差异）。
+- **pwsh 运行在 ConstrainedLanguage**（受限令牌下 PowerShell 的既定行为，真机实测 `LanguageMode = ConstrainedLanguage`）：
+  .NET 方法调用（`[Console]::…`、`$obj.GetType()` 等）被禁，纯 cmdlet 与外部命令不受影响。
+  → 模型在 Windows 沙箱档下的 PowerShell 表达力弱于 unconfined，属于机制固有代价（已在本文件与 DESIGN 记录）。
+- **console isolation 不可用**：受限令牌下 `CREATE_NO_WINDOW`/`CREATE_NEW_CONSOLE` 子进程 `STATUS_DLL_INIT_FAILED`，子进程共享宿主控制台。
 - **可写目录须 caller 拥有**（owner-implicit `WRITE_DAC`）。
-- **Authenticated Users / INTERACTIVE / LOCAL 从两个列表剔除**（关 CIM/`C:\` 根树提权/Public 树写逃逸）；`whoami`/token 检查 cmdlet 在受限令牌下部分不可用。
+- **Authenticated Users / INTERACTIVE / LOCAL 从两个列表剔除**（关 CIM/`C:\` 根树提权/Public 树写逃逸）；
+  `whoami`/token 检查 cmdlet 在受限令牌下部分不可用。
+- **每命令一个 runner 子进程**：宿主不能持有 grant 生命周期（Bun 不能加载 koffi），故 temp grant 的物化/撤销是按次
+  进行的；工作区 ACE 因幂等跳过而无重复成本。代价是 ~80–100 ms 固定开销，换来宿主零原生依赖。
+- **超时/中止会绕过清理**：宿主 kill runner 时其 `finally`（撤销 temp grant + 删私有 temp 目录）不执行，
+  会在 `%TEMP%` 留下一个 `pi-sandbox-dsh-*` 目录及其 ACE（工作区 ACE 本就 standing，不受影响）。
+- **前置**：需要 PATH 里的系统 `node`（Bun 宿主不能跑 runner）；`koffi` 为 optionalDependency，随 `npm install` 落地，缺失时 `--probe` 非零 → 后端不可用。
+- **装配期探测失败仍是静默降级**（`core` 的 `backendError` 未消费，`pi-sandbox-dsh` 原有行为，非本次移植引入）：
+  probe 失败时不注册 shell 工具、也不通知用户，但 footer 徽标照旧显示档位。**待改进**（下一步候选）。
 
 ---
 
-## 4. 回归（Windows）
+## 5. 回归（Windows）
 
 ```powershell
 npm run typecheck
-npm test
-npm run probe   # winacl pwsh-under-token + read-only 往返 + dispose 撤销（需实现 probe 真机断言）
+npm test            # 结构 + 分类 + mock pi 装配端到端
+npm run probe       # 真机：runner capability + read-only/workspace-write 往返 + grant 生命周期
 ```
+
+失败排查顺序：`node --experimental-strip-types packages/sandbox/src/win32/runner.ts --probe`（原生能力）
+→ 直接跑一次 runner 写工作区（ACE/令牌）→ `icacls <dir>` 看 capability ACE 是否落地（`S-1-4-…` 形式）。
+
+> 清理误授 ACE：`icacls` 的 `/remove:g` 对这类 capability SID 不生效（实测），
+> 用 `revokeWrite()`（`win32/acl.ts`）或 `icacls <dir> /reset`（仅当该目录无其它显式 ACE 时）。
 
 ---
 
-## 5. 与 Linux 侧对齐
+## 6. 与 Linux 侧对齐
 
 - Linux=`bwrap`（`--ro-bind / /` + 按档 `--bind` 工作区 / `--tmpfs /tmp`），无 `--unshare-net`、无凭据掩码。
 - Windows=`winacl`（受限令牌 + NTFS ACE），读/网络同样不受限。

@@ -43,6 +43,11 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
+Windows prerequisites: a system `node` on `PATH` (the Bun host cannot run the Win32 runner subprocess) and the
+`koffi` optional dependency installed by `npm install`. Under the restricted token PowerShell runs in
+`ConstrainedLanguage` mode (no .NET method calls) — an inherent cost of the mechanism, see
+[docs/verify-windows.md](docs/verify-windows.md).
+
 See [docs/architecture.md](docs/architecture.md) for the architecture and [DESIGN.md](DESIGN.md) for the design rationale and known trade-offs.
 
 ## License
