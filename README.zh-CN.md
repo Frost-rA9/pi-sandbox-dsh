@@ -43,9 +43,9 @@
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
-Windows 前置：`PATH` 里的系统 `node`（Bun 宿主不能跑 Win32 runner 子进程）与 `npm install` 装上的 `koffi`
-（optionalDependency）。受限令牌下 PowerShell 运行在 `ConstrainedLanguage`（.NET 方法调用被禁）——
-机制固有代价，详见 [docs/verify-windows.md](docs/verify-windows.md)。
+Windows 前置：系统 `node`（Bun 宿主不能跑 Win32 runner 子进程；解析顺序 `PI_SANDBOX_NODE` → `PATH` → 用户/系统注册表
+`Path`）与 `npm install` 装上的 `koffi`（optionalDependency）。受限令牌下 PowerShell 运行在 `ConstrainedLanguage`
+（.NET 方法调用被禁）——机制固有代价，详见 [docs/verify-windows.md](docs/verify-windows.md)。
 
 架构见 [docs/architecture.md](docs/architecture.md)，设计依据与已知取舍见 [DESIGN.md](DESIGN.md)。
 

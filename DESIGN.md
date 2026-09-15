@@ -98,12 +98,13 @@
 - **winacl 每命令一个 runner 子进程**：宿主（Bun）不能加载 koffi → 不能持有 grant 生命周期，temp grant 按次物化/撤销（工作区 ACE 幂等复用）；净开销 ≈ 80–100 ms/命令。
 - **winacl 残留私有 temp 目录靠“下次调用”清扫，不是即时清理**：宿主超时/中止会 kill runner（`finally` 不跑）→ 目录与 ACE 留在 `%TEMP%`。补偿：每次 runner 调用开头先 `sweepStaleTempDirs`——只碰 `pi-sandbox-dsh-` 前缀；活体由**占用锁**判定（`temp-lock.ts`：先取锁再建目录 → 拿得到锁=死主，`ERROR_LOCK_VIOLATION`=活体），无锁文件的产物另需 5 min 年龄门槛；`%TEMP%/pi-sandbox-dsh-locks/` 为常驻锁目录（与 `pi-sandbox-dsh-acl-locks/` 同类设计产物）。清扫失败只告警，**不进 runner 失败契约**（退出码 127 只留给真正的失败）。
 - **winacl 超时/中止会绕过清理**：宿主 kill runner 时其 finally 不执行，`%TEMP%` 会留下一个 `pi-sandbox-dsh-*` 私有目录及其 ACE（工作区 standing ACE 不受影响）。
-- **winacl 依赖 PATH 里的系统 `node`**（runner 子进程）；缺 `node`/`koffi` 时 `probe()` 非零 → fail-closed 不可用。
+- **winacl 依赖 PATH 里的系统 `node`（runner 子进程）**：宿主是 Bun → runner 必须跑在系统 Node 上。**解析不只看 PATH**：`PI_SANDBOX_NODE`（显式覆盖）→ `PATH` → Windows 注册表 `Path`（用户/系统，覆盖 "pi 由陈旧终端启动、进程持有过期 PATH" 这一真机故障）；全部失败才 fail-closed。`PI_SANDBOX_NODE` 设置了但不可用 → 直接失败（不静默换别的）。
+- **probe 失败原因由后端自声明**（`SandboxBackendInfo.detail`）：bwrap 缺依赖 / winacl 缺 Node / runner probe 失败各有自己的文案，宿主不再写死某一后端的原因（否则 winacl 失败会报成 bwrap）。
 - **devDep ≥ 0.84.4**（0.84.1 不导出 `createPowerShellTool`）。
 
 ## 八、验证与规模
 
 - `npm run typecheck`（strict，全部 workspace）。
-- `npm test`：core 档位折叠 / 严格更宽判定 / escalate 批准流（allowed-once / rejected / cancelled / unavailable / 非更宽）/ fail-closed / denial+hint 标记 / **后端不可用的可见化**（不注册 shell 工具 + error 通知 + `(no backend)` 徽标）；sandbox `selectBackend` / bwrap / winacl 签名 / **结果侧分类**（runner 失败优先、denial 需非零退出、signal 死亡不判定、danger 不判定、分类窗口有界）/ **残留 temp 目录清扫策略**（死主 vs 活体 vs 无锁年龄门槛、ownDir 排除、probe 抛错隔离）。
+- `npm test`：core 档位折叠 / 严格更宽判定 / escalate 批准流（allowed-once / rejected / cancelled / unavailable / 非更宽）/ fail-closed / denial+hint 标记 / **后端不可用的可见化**（不注册 shell 工具 + error 通知（原因来自后端自声明）+ `(no backend)` 徽标）；sandbox `selectBackend` / bwrap / winacl 签名 / **结果侧分类**（runner 失败优先、denial 需非零退出、signal 死亡不判定、danger 不判定、分类窗口有界）/ **残留 temp 目录清扫策略**（死主 vs 活体 vs 无锁年龄门槛、ownDir 排除、probe 抛错隔离）/ **runner Node 解析纯函数**（Windows/POSIX 分隔符、去重、去引号）。
 - `npm run probe`（真机）：Linux/WSL2 = bwrap `--version`；Windows = runner capability（koffi/令牌/默认 DACL/Job）+ 残留清扫（死主被删 / 活体与太新保留）+ read-only 写被拒/读全开 + workspace-write 工作区内可写/工作区外被拒 + 工作区 ACE 幂等（仅 1 条）+ temp 目录无残留。
 - 规模参考：约 3 个包，src 控制在 ~2000 行内（核心小）。

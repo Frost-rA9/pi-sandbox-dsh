@@ -38,6 +38,7 @@ Windows 用 **`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单**，shell=
 | `temp-lock.ts` | 占用锁（`CreateFileW` 不共享 delete + `LockFileEx`）与私有目录创建（**先取锁再建目录**） | pi 侧新增（死主/活体判定） |
 | `path-boundary.ts` / `workspace-sid.ts` | 路径边界 / SID 派生（原有，未改） | 同源逐项 |
 | `../probe.ts` | `npm run probe` 真机探针（**pi 侧新增**） | pi 侧 |
+| `../node-runtime.ts` | runner 需要的**系统 Node** 解析（`PI_SANDBOX_NODE` → `PATH` → Windows 注册表 `Path`；失败详情进 `info.detail`） | pi 侧新增（真机故障回归） |
 
 **宿主（Bun）与原生层彻底隔离**：宿主只 import `runner-contract.ts`（纯函数）与 `winacl.ts`（spawn 驱动），FFI 图只在 Node runner 子进程里被真正执行。
 
@@ -84,6 +85,7 @@ npm run probe       # 12 passed, 0 failed
 | workspace-write：写工作区外 | 被拒 |
 | grant 生命周期 | 两次 grant 后工作区仅 **1 条** capability ACE（幂等）；runner 私有 temp 无残留（锁目录不计）|
 | 残留清扫 | 无锁+老 mtime 的目录被删；无锁但新建的保留；**真持锁**的活体目录保留（跨进程锁判定）|
+| runner Node 解析 | 在“独立登录环境且 PATH 无 node”（计划任务复现）下仍能解析到注册表 `Path` 里的 node → 注册受限 `powershell` 工具、**无通知**；`PI_SANDBOX_NODE` 指向不可用时给出精确原因 |
 | read-only 不带写能力 | 工作区 standing ACE 保留但不生效 |
 
 `packages/core/test/load.spec.ts` 另有**结果侧分类端到端**：用 mock pi 装配扩展 → 注册的 powershell 工具真跑一条
@@ -119,7 +121,10 @@ confined 命令 → workspace-write 内写成功、外写拿到 `[sandbox: file 
 - **超时/中止会绕过清理，由下次调用补偿**：宿主 kill runner 时其 `finally` 不执行，会在 `%TEMP%` 留下一个
   `pi-sandbox-dsh-*` 目录及其 ACE（工作区 ACE 本就 standing，不受影响）；下一次任一档位的 runner 调用会清扫它
   （占用锁判定死主/活体；无锁残留需 5 min 年龄门槛）。`%TEMP%/pi-sandbox-dsh-locks/` 是常驻锁目录。
-- **前置**：需要 PATH 里的系统 `node`（Bun 宿主不能跑 runner）；`koffi` 为 optionalDependency，随 `npm install` 落地，缺失时 `--probe` 非零 → 后端不可用。
+- **前置**：需要系统 `node`（Bun 宿主不能跑 runner）；`koffi` 为 optionalDependency，随 `npm install` 落地，缺失时 `--probe` 非零 → 后端不可用。
+  Node **解析顺序**：`PI_SANDBOX_NODE`（显式覆盖，设置了但不可用则直接失败）→ `PATH` → Windows 注册表 `Path`（用户/系统）。
+  注册表回退是为修复真机故障：pi 若由**早于 node 安装/变更时打开的终端**启动，进程会一直持有过期 PATH，
+  导致 runner 探针找不到 node → 整个 winacl 后端不可用（现已自动回退并成功）。
 - **装配期探测失败现在会显式告知**（不再是静默降级）：不注册受限 shell 工具 + `session_start` 发一条 error 通知
   （英文，说明“壳未收敛”与修复方向）+ 徽标追加 `(no backend)`（对齐 DESIGN 不变量 10）。
 
@@ -129,7 +134,7 @@ confined 命令 → workspace-write 内写成功、外写拿到 `[sandbox: file 
 
 ```powershell
 npm run typecheck
-npm test            # 结构 + 分类 + 清扫策略 + mock pi 装配端到端 + 后端不可用可见化
+npm test            # 结构 + 分类 + 清扫策略 + runner Node 解析 + mock pi 装配端到端 + 后端不可用可见化
 npm run probe       # 真机：runner capability + 残留清扫 + read-only/workspace-write 往返 + grant 生命周期
 ```
 
