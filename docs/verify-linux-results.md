@@ -54,3 +54,40 @@
 
 - 验证期间产生的所有探针文件已删除；工作区 `git status` 干净，未提交任何改动。
 - 验证结束时沙箱档位恢复为默认 **read-only**（fail-safe）。
+
+---
+
+## §4 结果侧分类增量验证（参考源刷新到 dsh `0d1f50007f` / `0.1.6-alpha.1`）
+
+> 变更：把 dsh 的"结果侧分类"（runner 失败 vs 策略拒绝）首次接入 pi 的 shell 工具缝。
+> 环境：WSL2 Linux + bwrap 0.11.1 + `node v24.20.0`（volta）+ npm 11.19.0。
+> 本轮在 **workspace-write** 档内执行（`npm test` 含 bwrap 嵌套 spawn，实测通过）。
+
+### 自动测试
+
+| 项 | 结果 |
+|---|---|
+| `npm run typecheck`（bridge / core / sandbox） | ✅ 三包全过（strict） |
+| bridge（含新分类用例） | ✅ 52 passed |
+| core / load | ✅ 10 / 13 passed |
+| sandbox / winacl / **classify（新）** | ✅ 23 / 15 / 20 passed |
+| bwrap-e2e（真实 bwrap + 生产路径分类） | ✅ 15 passed |
+
+### 真实 bwrap 端到端（生产路径：`spawnHook` → `operations.exec`）
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| read-only 下 `echo hi > 工作区文件` | 退出非零 + 模型可见输出尾部含 `[sandbox: file access denied under read-only mode]` + 切档提示 | ✅ EROFS 真实触发，标记落在命令输出之后 |
+| read-only 下 `wc -c <文件>` | 退出 0、**无**标记 | ✅ |
+| PATH 前置假 `bwrap`（打印 `bwrap: …` 致命行 + 一行 denial 方言，退出 1） | 抛错、`code=SANDBOX_UNAVAILABLE`、文案含 "not a policy denial"、**不追** denial 标记 | ✅ runner 失败优先于 denial |
+
+### 发现
+
+1. **runner 失败路径需要 process 级 PATH 才能端到端模拟**：bwrap 后端的 `spawnHook` 用白名单 env（取自 `process.env`，不含密钥），所以测试里传 `env` 无法影响它；注入假 `bwrap` 只能改 `process.env.PATH`（测完还原）。这不是缺陷，是既有 env 白名单设计的直接结果，已写入 `DESIGN.md` §七。
+2. **pi 的 shell 工具没有后台任务路径**（schema 只有 `command / timeout`）：原计划里的"后台任务是否绕开收敛"核对结论 = 无该路径，无需收敛（dsh `processJob` 在 pi 无对应物）。
+3. **`user_bash`（`!` / `!!`）不经本扩展**：用户自己的命令走 pi 独立缝（默认本地 bash operations）；按"沙箱管模型写面"的定位不拦截，已在 `DESIGN.md` §七 记为边界。
+4. 与旧记录「sandbox 包自测不可用 workspace-write（嵌套 bwrap 大概率失败）」相反：本轮 workspace-write 档内嵌套 bwrap **通过**（WSL2 userns 允许嵌套）。仍建议优先在未沙箱化终端跑 sandbox 包自测，但不再是硬约束。
+
+### 收尾
+
+- 未提交任何改动；工作区改动留待明确指示后再提交。

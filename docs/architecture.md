@@ -1,7 +1,7 @@
 # pi-sandbox-dsh · 技术设计（dsh 单源，完整复现）
 
 > 配套：根 `AGENTS.md`（本地设计依据，gitignored）；本文为可入库的架构/设计说明。
-> 参考源：**dsh**（`deepseek-harness`）@ `~/projects/deepseek-harness`，HEAD `5dda764`。
+> 参考源：**dsh**（`deepseek-harness`）@ `~/projects/deepseek-harness`，HEAD `0d1f50007f`（`0.1.6-alpha.1`；上一轮锚点为 `5dda764`）。
 > 本文把 dsh 沙箱**全链路**（tool 层 → executor → provider → policy → escalation → 渲染 → 后端）逐一映射到 pi 扩展 API，并用**三段式判定门**（pi 原生 → dsh 语义 → pi 裁剪）给出每条功能的落地。
 
 ---
@@ -58,18 +58,23 @@ bash-sandbox (executor)         sandbox-local (provider)
 
 ## 2. executor 层（`@deepseek-ai/dsh-bash-sandbox`）
 - `run/start`：`danger-full-access` → 原样执行；否则 `confine(['bash','-c',cmd], policy)`（provider 包装 argv）。
-- 分类：`classifyRunnerFailure`（runner 自身失败 → `SANDBOX_UNAVAILABLE`，命令没跑）、`classifyDenial`（stderr 匹配 denial 方言 → `denied:true`）、`enforcement`。
+- 分类：`classifyRunnerFailure`（runner 自身失败 → 抛 `SandboxUnavailableError`；命令没跑起来，**不算 denial**）、`classifyDenial`（非零退出 + 本后端方言 → `denied:true`）、`enforcement`。
 - 结果携带 `sandbox: { mode, denied, enforcement, runnerFailed }`。
 
-**三段式 → pi**：pi 在 `createBashTool` 的 `spawnHook` 里改**命令字符串**（`bwrap <profile> -- sh -c '<cmd>'`）；winacl 走 `operations.exec`。**不新增 executor**，分类逻辑并入上图 execute 的探针。
+**三段式 → pi**：pi 在 `createBashTool` 的 `spawnHook` 里改**命令字符串**（`bwrap <profile> -- sh -c '<cmd>'`）；winacl 走 `operations.exec`（其 danger 档回落到本地 pwsh operations）。pi 的 `spawnHook` 由工具先跑、再把 `command/cwd/env` 交给 `operations.exec`，**两者可共存** → 结果侧分类就挂在 `operations.exec` 上（`packages/sandbox/src/classify.ts`：`createConfinedOperations`），**不新增 executor、不 fork 工具**。
+
+与 dsh 的已知差异（见 `DESIGN.md` §七）：
+- dsh 的 `confine(argv, policy, signal): Promise` 是 async + 可取消；pi 的 `spawnHook` 同步，故不移植取消协议，预备（winacl 令牌/ACE）只能在 `operations.exec` 内自己做。
+- dsh 自己持有完整 stderr；pi 只有 `onData` 流 → 分类窗口有界（尾部 64 KiB）。
+- dsh 声称 `denied` 事实而不改文本；pi 把 denial 标记**追加进模型可见输出**（pi 的 `BashToolDetails` 无 `stderr/exitCode` 字段，无别的结构化出口）。
 
 ## 3. provider 层（`@deepseek-ai/dsh-sandbox-local`）
 - `PLATFORM_CHAINS = { linux:['bwrap','landlock'], darwin:['seatbelt'], win32:['windows-acl'] }`。
-- `confine(argv, policy)` → 选 runner + profile → 返回包装 argv + enforcement + denial 方言 + runner-failure 规则。
+- `confine(argv, policy, signal?)` → 选 runner + profile → 返回 `ConfinedArgv`（argv + `enforcement` + `denialSignatures` + `runnerFailureRules`）。
 - platform 无可用 runner → `SandboxUnavailableError`（fail-closed）。
 - ACL grant 生命周期（win）：工作区 SID 确定性、ACE **stand（跨会话复用缓存，exact-ACE skip O(1)）**；每会话**随机 temp 目录 + SID**，dispose 撤销；provider dispose 清 temp、保工作区站台 ACE。
 
-**三段式 → pi**：`selectBackend()`（bwrap/winacl）+ `probe()`；`createBashTool` spawnHook 用 bwrapProfile、`createPowerShellTool` operations 用 winacl Node runner。**provider 承载 grant 生命周期**（winacl 由 Node runner 子进程承载，Bun 宿主不 load koffi）。
+**三段式 → pi**：`selectBackend()`（bwrap/winacl）+ `probe()`；`createBashTool` spawnHook 用 bwrapProfile（argv 包装）+ `operations`（结果侧分类），`createPowerShellTool` operations 用 winacl Node runner + 同一分类包装。**provider 承载 grant 生命周期**（winacl 由 Node runner 子进程承载，Bun 宿主不 load koffi）；后端只声明**自己的** denial 方言与 runner 失败规则（不用跨后端并集）。
 
 ## 4. policy 层（`@deepseek-ai/dsh-sandbox-policy`）
 - `resolve({session, mode})`：`mode`（显式批准）> 会话最近 `sandbox/mode` 事件 > 部署默认；`workspaceRoot` = 会话 cwd > 配置 root。返回 `SandboxExecutionPolicy`（含 `sessionId`）。
