@@ -10,7 +10,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types test/sandbox.spec.ts && node --experimental-strip-types test/winacl.spec.ts && node --experimental-strip-types test/temp-sweep.spec.ts && node --experimental-strip-types test/classify.spec.ts && node --experimental-strip-types test/bwrap-e2e.spec.ts"
+    "test": "node --experimental-strip-types test/sandbox.spec.ts && node --experimental-strip-types test/winacl.spec.ts && node --experimental-strip-types test/node-runtime.spec.ts && node --experimental-strip-types test/temp-sweep.spec.ts && node --experimental-strip-types test/classify.spec.ts && node --experimental-strip-types test/bwrap-e2e.spec.ts"
   },
   "dependencies": {
     "pi-sandbox-dsh-bridge": "file:../bridge"

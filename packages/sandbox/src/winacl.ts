@@ -20,6 +20,7 @@ import type { RunnerFailureRule, SandboxBackendInfo } from "pi-sandbox-dsh-bridg
 import { RUNNER_FAILURE_RULES, SANDBOX_UNAVAILABLE } from "pi-sandbox-dsh-bridge";
 import type { SandboxBackend, BackendContext } from "./backend.ts";
 import { createConfinedOperations, resolveRunFacts } from "./classify.ts";
+import { resolveNodeRuntime } from "./node-runtime.ts";
 import { buildWinaclRunnerArgv, winaclUsable } from "./win32/runner-contract.ts";
 
 const WINACL_DIR = dirname(fileURLToPath(import.meta.url));
@@ -37,15 +38,31 @@ const RUNNER_NODE_FLAGS = ["--experimental-strip-types"] as const;
 /** danger 档（本后端不参与）时的回落执行器：pi 本地 pwsh。 */
 const localPowerShellOperations: BashOperations = createLocalPowerShellOperations();
 
-/** probe（同步）：非 win32 或 runner `--probe` 非零 → 不可用（fail-closed）。 */
-function runProbe(): boolean {
-  if (!winaclUsable()) return false;
-  try {
-    const r = spawnSync("node", [...RUNNER_NODE_FLAGS, RUNNER_PATH, "--probe"], { timeout: 60_000 });
-    return r.status === 0;
-  } catch {
-    return false;
+/**
+ * probe（同步）：非 win32 / 无可用 Node / runner `--probe` 非零 → 不可用（fail-closed）。
+ * 失败原因写进 `info.detail`（宿主拿它做用户可见通知——切勿再写死某个后端的原因）。
+ */
+function runProbe(): { available: boolean; detail?: string } {
+  if (!winaclUsable()) {
+    return { available: false, detail: `the winacl backend is Windows-only (host platform: ${process.platform})` };
   }
+  const node = resolveNodeRuntime();
+  if (!("command" in node)) return { available: false, detail: node.detail };
+  let result;
+  try {
+    result = spawnSync(node.command, [...RUNNER_NODE_FLAGS, RUNNER_PATH, "--probe"], { timeout: 60_000, encoding: "utf8" });
+  } catch (error) {
+    return { available: false, detail: `could not spawn the winacl runner probe: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (result.status === 0) return { available: true };
+  const stderrTail = typeof result.stderr === "string" ? result.stderr.trim().split(/\r?\n/u).slice(-3).join(" | ") : "";
+  const cause = result.error !== undefined && result.error !== null
+    ? result.error.message
+    : `exit ${String(result.status ?? "null")}`;
+  return {
+    available: false,
+    detail: `the winacl runner probe failed via ${node.source} node (${cause})${stderrTail === "" ? "" : `: ${stderrTail}`}`,
+  };
 }
 
 /** 构造 runner 失败错误（带 `SANDBOX_UNAVAILABLE` 错误码，fail-closed 且不裸跑重试）。 */
@@ -97,7 +114,12 @@ function invokeRunner(
   }
 
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn("node", [...RUNNER_NODE_FLAGS, runnerEntry, ...runnerArgs, "--", ...shellCommand], {
+    const node = resolveNodeRuntime();
+    if (!("command" in node)) {
+      rejectPromise(runnerUnavailable(node.detail));
+      return;
+    }
+    const child = spawn(node.command, [...RUNNER_NODE_FLAGS, runnerEntry, ...runnerArgs, "--", ...shellCommand], {
       cwd,
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -166,8 +188,10 @@ class WinaclBackend implements SandboxBackend {
   info: SandboxBackendInfo = { kind: "winacl", available: false, shellTool: "powershell" };
 
   probe(): boolean {
-    this.info.available = runProbe();
-    return this.info.available;
+    const result = runProbe();
+    this.info.available = result.available;
+    if (result.detail !== undefined) this.info.detail = result.detail;
+    return result.available;
   }
 
   createToolOptions(ctx: BackendContext): BashToolOptions {

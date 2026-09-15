@@ -88,7 +88,9 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
           : createBashTool(store.workspaceRoot, toolOptions);
       pi.registerTool(shellTool as never);
     } else {
-      backendError = "沙箱后端探测失败（bwrap --version 未通过）；bash 未加收敛";
+      // 后端自己声明失败原因（bwrap 缺依赖 / winacl 缺 Node / runner probe 失败…），不要写死某一后端。
+      backendError = backend.info.detail
+        ?? `${backend.kind} backend probe failed`;
     }
   } catch (e) {
     backendError = e instanceof Error ? e.message : String(e);

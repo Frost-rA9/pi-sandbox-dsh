@@ -1,14 +1,17 @@
 /**
  * pi-sandbox-dsh-core · 后端不可用时的可见化（probe 失败路径）。
  *
- * 手法：把 `PATH` 清空后实例化扩展 → bwrap / node 都探测不到 → `probe()` 必失败。
+ * 手法：把 `PATH` 清空**并**把 `PI_SANDBOX_NODE` 指向不存在的可执行文件 → 解析不到可用 Node
+ * （Windows 走 winacl/Node runner；Linux 走 bwrap），probe 必失败。
  * 期望（fail-closed + 诚实告知）：
  * - 不注册受限 shell 工具（避免假收敛）；
  * - `/sandbox` 命令与 `tool_call` 文件门控仍在；
- * - `session_start` 发一条 error 级通知，说明"壳未收敛"，并给出修复方向；
+ * - `session_start` 发一条 error 级通知，说明"壳未收敛"+**后端自声明的真实原因**（不再写死 bwrap 文案），
+ *   并给出修复方向；
  * - footer 徽标带 `(no backend)`，不宣称一个未生效的档位。
  */
 import sandboxExtension from "../src/index.ts";
+import { resolve } from "node:path";
 
 let passed = 0;
 let failed = 0;
@@ -43,7 +46,10 @@ console.log("=== PATH 清空后实例化（后端必探测失败） ===");
 const pathKeys = Object.keys(process.env).filter((key) => key.toLowerCase() === "path");
 if (!pathKeys.includes("PATH")) pathKeys.push("PATH");
 const savedPathValues = new Map(pathKeys.map((key) => [key, process.env[key]]));
+const savedNodeOverride = process.env.PI_SANDBOX_NODE;
 for (const key of pathKeys) process.env[key] = "";
+// 显式覆盖指向不存在的 Node：保证确定性失败（否则 Windows 会从注册表 Path 里找到 node）。
+process.env.PI_SANDBOX_NODE = resolve(process.cwd(), "no-such-node-binary.exe");
 try {
   sandboxExtension(pi);
   passed++;
@@ -55,6 +61,8 @@ try {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+  if (savedNodeOverride === undefined) delete process.env.PI_SANDBOX_NODE;
+  else process.env.PI_SANDBOX_NODE = savedNodeOverride;
 }
 
 console.log("=== 未注册受限 shell 工具（fail-closed，不假收敛） ===");
@@ -85,6 +93,14 @@ assert(notice?.type === "error", "通知级别为 error", String(notice?.type));
 assert((notice?.message ?? "").includes("sandbox backend unavailable"), "通知说明后端不可用");
 assert((notice?.message ?? "").includes("not OS-confined"), "通知明说壳未被收敛（不误导为策略拒绝）");
 assert(/node|bwrap/u.test(notice?.message ?? ""), "通知给出修复方向（node / bwrap）");
+// 原因必须来自后端自声明，而不是写死的单一后端文案：
+// win32 → winacl（缺 Node / runner probe 失败）；其他平台 → bwrap。
+if (process.platform === "win32") {
+  assert((notice?.message ?? "").includes("PI_SANDBOX_NODE"), "winacl 失败原因含显式覆盖项（不再是写死的 bwrap 文案）",
+    (notice?.message ?? "").slice(0, 200));
+} else {
+  assert((notice?.message ?? "").includes("bwrap"), "bwrap 失败原因由 bwrap 后端自声明", (notice?.message ?? "").slice(0, 200));
+}
 assert(statuses.some((value) => value.includes("(no backend)")), "徽标带 (no backend)", statuses.join(" | "));
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);

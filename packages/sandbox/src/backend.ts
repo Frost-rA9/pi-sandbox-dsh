@@ -58,6 +58,9 @@ class BwrapBackend implements SandboxBackend {
 
   probe(): boolean {
     this.info.available = probeBwrap();
+    if (!this.info.available) {
+      this.info.detail = "bwrap is not usable on this host (bwrap --version failed — install bubblewrap or fix PATH)";
+    }
     return this.info.available;
   }
 

@@ -287,9 +287,11 @@ export function sandboxWideningHint(): string {
 
 /* ------------------------------ 后端信息 ------------------------------ */
 
-/** 后端信息：种类 + 可用性 + 沙箱 shell。 */
+/** 后端信息：种类 + 可用性 + 沙箱 shell + 探测失败原因。 */
 export interface SandboxBackendInfo {
   kind: SandboxBackendKind
   available: boolean
   shellTool: SandboxShellTool
+  /** 探测失败的用户可见原因（fail-closed 通知用；成功时可省略）。 */
+  detail?: string
 }
