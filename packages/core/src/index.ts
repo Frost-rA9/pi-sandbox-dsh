@@ -18,18 +18,32 @@ import { selectBackend, type SandboxBackend } from "pi-sandbox-dsh-sandbox";
 import { initState, foldSandboxMode, SANDBOX_MODE_ENTRY, type SandboxState } from "./state.ts";
 import { registerFileToolGate } from "./tools-fs.ts";
 
-/** 徽标文案 `[<mode>]`：只读=橙(256色208，pi 主题无橙)、工作区可写=蓝(accent)、全权=红(error)。 */
-function sandboxBadgeText(theme: Theme, mode: SandboxMode): string {
-  switch (mode) {
-    case 'read-only':
-      return '\x1B[38;5;208m[read-only]\x1B[0m';
-    case 'workspace-write':
-      return theme.fg('accent', '[workspace-write]');
-    case 'danger-full-access':
-      return theme.fg('error', '[danger-full-access]');
-    default:
-      return '[sandbox]';
-  }
+/**
+ * 徽标文案 `[<mode>]`：只读=橙(256色208，pi 主题无橙)、工作区可写=蓝(accent)、全权=红(error)。
+ * 后端不可用时追加 ` (no backend)`；否则徽标会宣告一个并未生效的档位（写入面没有被 OS 约束）。
+ */
+function sandboxBadgeText(theme: Theme, mode: SandboxMode, backendAvailable: boolean): string {
+  const base = (() => {
+    switch (mode) {
+      case 'read-only':
+        return '\x1B[38;5;208m[read-only]\x1B[0m';
+      case 'workspace-write':
+        return theme.fg('accent', '[workspace-write]');
+      case 'danger-full-access':
+        return theme.fg('error', '[danger-full-access]');
+      default:
+        return '[sandbox]';
+    }
+  })();
+  return backendAvailable ? base : `${base} (no backend)`;
+}
+
+/** 后端不可用时的通知文案（英文，对齐通知机制约定）：说明"壳未被收敛"而不是假装档位生效。 */
+function backendUnavailableNotice(detail: string): string {
+  return 'pi-sandbox-dsh: sandbox backend unavailable — the confined shell tool was NOT registered, so shell commands are not OS-confined '
+    + '(write/edit stay gated by the current mode). '
+    + `Reason: ${detail} `
+    + 'Fix the backend (Windows: a system `node` on PATH + `koffi`; Linux/WSL2: bwrap) or switch to danger-full-access explicitly.';
 }
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
@@ -38,7 +52,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   // footer 徽标（方案 A）：setStatus 写入 pi footer 状态槽（不替换、永不丢信息、不随 pi 升级漂移）
   const updateSandboxBadge = (ui: ExtensionUIContext | undefined): void => {
     if (!ui) return;
-    ui.setStatus('pi-sandbox-dsh', sandboxBadgeText(ui.theme, store.mode));
+    ui.setStatus('pi-sandbox-dsh', sandboxBadgeText(ui.theme, store.mode, backendError === undefined));
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -46,6 +60,11 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     const entries = (ctx.sessionManager?.getEntries?.() ?? []) as readonly unknown[];
     store.mode = foldSandboxMode(entries as never, store.defaultMode);
     updateSandboxBadge(ctx.ui);
+    // fail-closed 的“可见化”：后端不可用时壳工具根本没注册（pi 内置 shell 仍在，即未被收敛）——
+    // 必须显式告知用户，不能让徽标宣称一个没生效的档位。
+    if (backendError !== undefined) {
+      ctx.ui?.notify(backendUnavailableNotice(backendError), "error");
+    }
   });
 
   // 读取当前执行 policy（spawnHook 用）
