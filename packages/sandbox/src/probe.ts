@@ -10,13 +10,16 @@
  * 退出码 0 = 全部通过；1 = 有失败（fail-closed：探针失败即视为后端不可用）。
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPowerShellConfig } from "@earendil-works/pi-coding-agent";
 import { probeBwrap } from "./bwrap.ts";
 import { buildWinaclRunnerArgv, winaclUsable } from "./win32/runner-contract.ts";
+import { win32Sync } from "./win32/ffi.ts";
+import { createPrivateTempDir } from "./win32/temp-lock.ts";
+import { isPrivateTempDirName, STALE_WITHOUT_LOCK_MS, TEMP_DIR_PREFIX } from "./win32/temp-sweep.ts";
 
 let passed = 0;
 let failed = 0;
@@ -77,6 +80,27 @@ function probeWindows(): void {
     assert(probe.status === 0, "runner --probe 返回 0（koffi/令牌/DACL/Job 能力齐备）",
       `${probe.status}: ${(probe.stderr ?? "").trim()}`);
 
+    console.log("=== winacl · 残留私有 temp 目录的清扫（占用锁活体判定） ===");
+    // 三种样本：死主残留（无锁 + 老 mtime）、太新无锁（不该动）、活体（真取锁并持有）。
+    const staleDir = join(tempRoot, `${TEMP_DIR_PREFIX}stale-probe`);
+    mkdirSync(staleDir, { recursive: true });
+    const oldTime = new Date(Date.now() - STALE_WITHOUT_LOCK_MS - 60_000);
+    utimesSync(staleDir, oldTime, oldTime);
+    const freshDir = join(tempRoot, `${TEMP_DIR_PREFIX}fresh-probe`);
+    mkdirSync(freshDir, { recursive: true });
+    const liveTemp = createPrivateTempDir(win32Sync(), tempRoot);
+    const sweepRun = runRunner([
+      "--workspace", workspace, "--temp", tempRoot, "--mode", "read-only", "--",
+      ...pwshCommand("$null = 1"),
+    ]);
+    assert(sweepRun.status === 0, "触发清扫的 confined 命令成功", `${sweepRun.status}: ${sweepRun.output.trim().slice(0, 200)}`);
+    assert(existsSync(staleDir) === false, "死主残留（无锁 + 老 mtime）被清扫");
+    assert(existsSync(freshDir), "无锁但新建的目录被保留（年龄门槛）");
+    assert(existsSync(liveTemp.dir), "活体 runner 的私有目录被保留（锁被持有）");
+    liveTemp.remove();
+    rmSync(freshDir, { recursive: true, force: true });
+    assert(existsSync(liveTemp.dir) === false, "收尾：活体样本已自行清理");
+
     console.log("=== winacl · read-only 往返 ===");
     const roWrite = runRunner([
       "--workspace", workspace, "--temp", tempRoot, "--mode", "read-only", "--",
@@ -118,8 +142,8 @@ function probeWindows(): void {
     console.log("=== winacl · grant 生命周期 ===");
     const acesAfter = countCapabilityAces(workspace);
     assert(acesAfter === 1, "工作区 standing ACE 幂等：两次 grant 后仅 1 条 capability ACE", `实际 ${acesAfter} 条`);
-    const leftovers = readdirSync(tempRoot).filter((name) => name.startsWith("pi-sandbox-dsh-"));
-    assert(leftovers.length === 0, "runner 自建私有 temp 目录已清理（temp ACE 随之不可残留）", leftovers.join(", "));
+    const leftovers = readdirSync(tempRoot).filter((name) => isPrivateTempDirName(name));
+    assert(leftovers.length === 0, "无残留私有 temp 目录（占用锁目录属设计内产物，不计）", leftovers.join(", "));
 
     console.log("=== winacl · read-only 不携带写能力 ===");
     const workspaceViaRo = countCapabilityAces(workspace);

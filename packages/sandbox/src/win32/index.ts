@@ -13,3 +13,19 @@
  */
 export * from "./acl-sandbox.ts";
 export { assertPrivateTempDisjoint } from "./path-boundary.ts";
+export {
+  createPrivateTempDir,
+  createTempLockProbe,
+  type PrivateTempDir,
+} from "./temp-lock.ts";
+export {
+  isPrivateTempDirName,
+  STALE_WITHOUT_LOCK_MS,
+  sweepStaleTempDirs,
+  TEMP_DIR_PREFIX,
+  TEMP_LOCK_DIR_NAME,
+  tempLockPath,
+  type TempLockProbe,
+  type TempLockState,
+  type TempSweepResult,
+} from "./temp-sweep.ts";
