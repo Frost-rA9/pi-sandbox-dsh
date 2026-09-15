@@ -119,6 +119,8 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 - **enforcement=partial**（Everyone 保留 / NTFS 硬链接 / 同身份读限制）；实际受限令牌下 pwsh 跑在 `ConstrainedLanguage`（.NET 方法调用被禁）。
 - **宿主/原生隔离**：pi 宿主是 Bun（不能加载 koffi）→ 宿主只含 `runner-contract.ts`（argv 纯函数）+ `winacl.ts`（spawn 驱动），全部 Win32 逻辑在 runner 子进程；装配期 `runner --probe` 判定可用性（fail-closed）。
 - **grant 归属**：宿主不能物化 ACE → runner 走 standalone 流程（自行派生工作区 SID、建私有 temp 并授予/撤销）；工作区 ACE 幂等保留（standing reuse cache）。
+- **残留清扫**：宿主 kill runner 会留下私有 temp 目录；每次 runner 调用开头用**占用锁**（先取锁再建目录）判定死主/活体并清扫（只碰 `pi-sandbox-dsh-` 前缀）。
+- **后端不可见性**：`probe()` 失败 → 不注册受限 shell 工具 + `session_start` error 通知 + 徽标 `(no backend)`（不假收敛）。
 
 **三段式 → pi**：落地 dsh 的 win32 后端（受限令牌 + NTFS ACE + Node runner），**只限写**（不含 deny-read / 凭据掩码）；无 plan/verify 档位。
 
@@ -179,5 +181,5 @@ workspace-write 追加: ['--tmpfs','/tmp','--bind', workspaceRoot, workspaceRoot
 ## 11. 验证
 
 - `npm run typecheck`（strict）。
-- `npm test`：pure（bridge）——`WIDER_MODES` 严格更宽 / `approveEscalation` 各结果 / `validateEscalationArgs` / `resolvePolicy` 优先级 / `sandboxDenialMarker`/`escalationHintMarker` / backlog denial 探测；`selectBackend` / bwrap / winacl 签名。
-- `npm run probe`：Linux/WSL2 = `bwrap --version`；Windows = winacl runner capability + read-only/workspace-write 往返 + grant 生命周期（ACE 幂等 + temp 清理）。
+- `npm test`：pure（bridge）——`WIDER_MODES` 严格更宽 / `approveEscalation` 各结果 / `validateEscalationArgs` / `resolvePolicy` 优先级 / `sandboxDenialMarker`/`escalationHintMarker` / backlog denial 探测；`selectBackend` / bwrap / winacl 签名 / 残留 temp 清扫策略 / 后端不可用可见化。
+- `npm run probe`：Linux/WSL2 = `bwrap --version`；Windows = winacl runner capability + 残留清扫（死主/活体）+ read-only/workspace-write 往返 + grant 生命周期（ACE 幂等 + temp 清理）。

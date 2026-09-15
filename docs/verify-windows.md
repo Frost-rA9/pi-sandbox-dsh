@@ -34,6 +34,8 @@ Windows 用 **`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单**，shell=
 | `acl-sandbox.ts` | `AclSandbox`（token + grant + spawn 组装，`manageDacls` 布尔） | dsh `sandbox-windows-acl/index.ts` |
 | `runner.ts` | argv-prefix 包装器（**pi 侧新增 `--probe`**；去掉 control-pipe） | dsh `sandbox-windows-acl/runner.ts` |
 | `runner-contract.ts` | `winaclUsable` + `buildWinaclRunnerArgv`（**纯函数，宿主专用**，避免宿主 import 到 FFI 图） | pi 侧结构契约 |
+| `temp-sweep.ts` | 残留私有 temp 目录的清扫策略（**纯逻辑 + 注入式活体判定**，可跨平台单测） | pi 侧新增（宿主 kill 的补偿） |
+| `temp-lock.ts` | 占用锁（`CreateFileW` 不共享 delete + `LockFileEx`）与私有目录创建（**先取锁再建目录**） | pi 侧新增（死主/活体判定） |
 | `path-boundary.ts` / `workspace-sid.ts` | 路径边界 / SID 派生（原有，未改） | 同源逐项 |
 | `../probe.ts` | `npm run probe` 真机探针（**pi 侧新增**） | pi 侧 |
 
@@ -55,6 +57,9 @@ Windows 用 **`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单**，shell=
   （工作区 ACE 保留 = dsh 的 standing reuse cache）。seam-managed 分支保留以对齐 dsh 契约（pi 暂不使用）。
 - **失败契约**：runner 侧任何失败打印 `windows-acl-run: <detail>` 并退出 `127`（`WINACL_RUNNER_FAILURE_EXIT`），
   宿主 `RUNNER_FAILURE_RULES.winacl` 据此判 runner 失败 → `SANDBOX_UNAVAILABLE`，**绝不**降级裸跑。
+- **残留清扫**：每次 runner 调用开头先扫 `--temp` 下的 `pi-sandbox-dsh-*`：有锁文件 → 非阻塞取锁（拿得到=死主→删；
+  `ERROR_LOCK_VIOLATION`=活体→留）；无锁文件 → 仅当 mtime 早于 5 min 才删。锁目录 `pi-sandbox-dsh-locks/` 常驻。
+  清扫只告警，不算 runner 失败（退出码仍为子进程退出码）。
 - **probe**：宿主扩展装配时同步 `spawnSync('node', [...runner, '--probe'])`，非零 → 后端不可用（fail-closed，不注册 shell 工具）。
   `--probe` 只做能力探针（koffi 绑定 / 当前令牌 / 受限令牌 / 默认 DACL / kill-on-close Job），不拉起子进程（装配期要快）。
 
@@ -77,7 +82,8 @@ npm run probe       # 12 passed, 0 failed
 | read-only：读工作区外 | 成功（读不受限） |
 | workspace-write：写工作区 | 成功落盘 |
 | workspace-write：写工作区外 | 被拒 |
-| grant 生命周期 | 两次 grant 后工作区仅 **1 条** capability ACE（幂等）；runner 私有 temp 目录无残留 |
+| grant 生命周期 | 两次 grant 后工作区仅 **1 条** capability ACE（幂等）；runner 私有 temp 无残留（锁目录不计）|
+| 残留清扫 | 无锁+老 mtime 的目录被删；无锁但新建的保留；**真持锁**的活体目录保留（跨进程锁判定）|
 | read-only 不带写能力 | 工作区 standing ACE 保留但不生效 |
 
 `packages/core/test/load.spec.ts` 另有**结果侧分类端到端**：用 mock pi 装配扩展 → 注册的 powershell 工具真跑一条
@@ -110,11 +116,12 @@ confined 命令 → workspace-write 内写成功、外写拿到 `[sandbox: file 
   `whoami`/token 检查 cmdlet 在受限令牌下部分不可用。
 - **每命令一个 runner 子进程**：宿主不能持有 grant 生命周期（Bun 不能加载 koffi），故 temp grant 的物化/撤销是按次
   进行的；工作区 ACE 因幂等跳过而无重复成本。代价是 ~80–100 ms 固定开销，换来宿主零原生依赖。
-- **超时/中止会绕过清理**：宿主 kill runner 时其 `finally`（撤销 temp grant + 删私有 temp 目录）不执行，
-  会在 `%TEMP%` 留下一个 `pi-sandbox-dsh-*` 目录及其 ACE（工作区 ACE 本就 standing，不受影响）。
+- **超时/中止会绕过清理，由下次调用补偿**：宿主 kill runner 时其 `finally` 不执行，会在 `%TEMP%` 留下一个
+  `pi-sandbox-dsh-*` 目录及其 ACE（工作区 ACE 本就 standing，不受影响）；下一次任一档位的 runner 调用会清扫它
+  （占用锁判定死主/活体；无锁残留需 5 min 年龄门槛）。`%TEMP%/pi-sandbox-dsh-locks/` 是常驻锁目录。
 - **前置**：需要 PATH 里的系统 `node`（Bun 宿主不能跑 runner）；`koffi` 为 optionalDependency，随 `npm install` 落地，缺失时 `--probe` 非零 → 后端不可用。
-- **装配期探测失败仍是静默降级**（`core` 的 `backendError` 未消费，`pi-sandbox-dsh` 原有行为，非本次移植引入）：
-  probe 失败时不注册 shell 工具、也不通知用户，但 footer 徽标照旧显示档位。**待改进**（下一步候选）。
+- **装配期探测失败现在会显式告知**（不再是静默降级）：不注册受限 shell 工具 + `session_start` 发一条 error 通知
+  （英文，说明“壳未收敛”与修复方向）+ 徽标追加 `(no backend)`（对齐 DESIGN 不变量 10）。
 
 ---
 
@@ -122,8 +129,8 @@ confined 命令 → workspace-write 内写成功、外写拿到 `[sandbox: file 
 
 ```powershell
 npm run typecheck
-npm test            # 结构 + 分类 + mock pi 装配端到端
-npm run probe       # 真机：runner capability + read-only/workspace-write 往返 + grant 生命周期
+npm test            # 结构 + 分类 + 清扫策略 + mock pi 装配端到端 + 后端不可用可见化
+npm run probe       # 真机：runner capability + 残留清扫 + read-only/workspace-write 往返 + grant 生命周期
 ```
 
 失败排查顺序：`node --experimental-strip-types packages/sandbox/src/win32/runner.ts --probe`（原生能力）
