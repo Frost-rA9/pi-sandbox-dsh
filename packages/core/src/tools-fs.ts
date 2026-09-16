@@ -49,18 +49,29 @@ export function classifyFileWrite(
   return { decision: "allow" };
 }
 
-/** 拼 block reason（denial + 可选 escalation hint）。 */
-export function denyReason(decision: { reason?: string }, advertise: boolean): string {
+/** 拼 block reason（denial + 可选 escalation hint）。无 OS 后端时标注“这是档位策略拒绝”。 */
+export function denyReason(
+  decision: { reason?: string },
+  advertise: boolean,
+  backendUnavailable = false,
+): string {
   const base = decision.reason ?? "write denied by sandbox policy";
-  return advertise ? `${base}\n${escalationHintMarker("operation")}` : base;
+  const qualified = backendUnavailable
+    ? `${base} (policy denial — no OS sandbox backend is available on this host; nothing was kernel-enforced)`
+    : base;
+  return advertise ? `${qualified}\n${escalationHintMarker("operation")}` : qualified;
 }
 
-/** 注册 write/edit 工具写面门控（tool_call 钩子）：被拒即征求用户批准（per-call 升级）。 */
+/**
+ * 注册 write/edit 工具写面门控（tool_call 钩子）：被拒即征求用户批准（per-call 升级）。
+ * @param backendUnavailable - 后端不可用时，拒绝文案标注“档位策略拒绝”（避免说成内核拒绝）。
+ */
 export function registerFileToolGate(
   pi: ExtensionAPI,
   _state: SandboxState,
   readState: (cwd: string) => SandboxExecutionPolicy,
   advertise: () => boolean,
+  backendUnavailable: () => boolean = () => false,
 ): void {
   pi.on("tool_call", async (event, ctx) => {
     const e = event as { type?: string; toolName?: string; input?: { path?: string } };
@@ -74,13 +85,14 @@ export function registerFileToolGate(
     if (advertise()) {
       const ui = (ctx as ExtensionContext).ui;
       if (ui?.select) {
+        const kind = backendUnavailable() ? "档位策略" : "沙箱";
         const choice = await ui.select(
-          `沙箱拒绝写入《${e.input?.path ?? "?"}》（${decision.reason ?? "policy denial"}）。允许本次吗？`,
+          `${kind}拒绝写入《${e.input?.path ?? "?"}》（${decision.reason ?? "policy denial"}${backendUnavailable() ? "；本机无 OS 沙箱后端" : ""}）。允许本次吗？`,
           ["允许本次", "拒绝"],
         );
         if (choice === "允许本次") return;
       }
     }
-    return { block: true, reason: denyReason(decision, advertise()) };
+    return { block: true, reason: denyReason(decision, advertise(), backendUnavailable()) };
   });
 }

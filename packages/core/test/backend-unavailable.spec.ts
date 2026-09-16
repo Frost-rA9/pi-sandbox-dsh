@@ -1,14 +1,14 @@
 /**
- * pi-sandbox-dsh-core · 后端不可用时的可见化（probe 失败路径）。
+ * pi-sandbox-dsh-core · 后端不可用时的行为（fail-closed + 不假收敛），DESIGN 不变量 4/10。
  *
- * 手法：把 `PATH` 清空**并**把 `PI_SANDBOX_NODE` 指向不存在的可执行文件 → 解析不到可用 Node
- * （Windows 走 winacl/Node runner；Linux 走 bwrap），probe 必失败。
- * 期望（fail-closed + 诚实告知）：
- * - 不注册受限 shell 工具（避免假收敛）；
- * - `/sandbox` 命令与 `tool_call` 文件门控仍在；
- * - `session_start` 发一条 error 级通知，说明"壳未收敛"+**后端自声明的真实原因**（不再写死 bwrap 文案），
- *   并给出修复方向；
- * - footer 徽标带 `(no backend)`，不宣称一个未生效的档位。
+ * 手法：把 `PATH` 清空**并**把 `PI_SANDBOX_NODE` 指向不存在的可执行文件 → 后端必探测失败
+ * （Windows 走 winacl/Node runner；Linux 走 bwrap），随即核对：
+ * - **受限壳工具仍在**（平台对应：win32=`powershell`，其余=`bash`）——缝恒在位，不是"工具消失"；
+ * - confined 档下**调用被拒**：抛 `SANDBOX_UNAVAILABLE`（带精确原因），**绝不裸跑**；
+ * - `danger-full-access` 下同一工具**委托 pi 本地 shell 并真的执行**（用户显式决策的出口）；
+ * - **未接管的同类壳**在该平台上被 `tool_call` 门控拦下（Windows 的 `bash`=git-bash 是真实绕过口）；
+ * - 文件门控仍在，且拒绝文案标注"档位策略拒绝（无 OS 后端）"；
+ * - `session_start` 发一条 error 通知 + 徽标带 `(no backend)`。
  */
 import sandboxExtension from "../src/index.ts";
 import { resolve } from "node:path";
@@ -23,17 +23,20 @@ function assert(cond: boolean, name: string, detail?: string): void {
   }
 }
 
+type Handler = (event: unknown, ctx: unknown) => unknown;
 const tools: Record<string, unknown>[] = [];
 const commands: Record<string, unknown> = {};
-const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+const handlers = new Map<string, Handler[]>();
 const statuses: string[] = [];
 const notices: { message: string; type: string | undefined }[] = [];
-
+const on = (name: string, handler: Handler): void => {
+  handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+};
 const pi = {
   registerTool: (t: unknown) => { tools.push(t as Record<string, unknown>); },
   registerCommand: (name: string, spec: unknown) => { commands[name] = spec; },
   registerFlag: () => {},
-  on: (name: string, h: (...a: unknown[]) => unknown) => { handlers[name] = h; },
+  on,
   sendMessage: () => {},
   appendEntry: () => {},
   setActiveTools: () => {},
@@ -41,7 +44,7 @@ const pi = {
   getFlag: () => undefined,
 } as never;
 
-console.log("=== PATH 清空后实例化（后端必探测失败） ===");
+console.log("=== 强制后端不可用后实例化 ===");
 // Windows 上环境变量名可能是 `Path`；把大小写变体全部清空，确保 node/bwrap 都探测不到。
 const pathKeys = Object.keys(process.env).filter((key) => key.toLowerCase() === "path");
 if (!pathKeys.includes("PATH")) pathKeys.push("PATH");
@@ -65,13 +68,16 @@ try {
   else process.env.PI_SANDBOX_NODE = savedNodeOverride;
 }
 
-console.log("=== 未注册受限 shell 工具（fail-closed，不假收敛） ===");
-const shellTools = tools.filter((t) => ["bash", "powershell"].includes(String(t.name)));
-assert(shellTools.length === 0, "不注册 bash/powershell 工具", shellTools.map((t) => String(t.name)).join(", "));
+const shellName = process.platform === "win32" ? "powershell" : "bash";
+const foreignShellName = process.platform === "win32" ? "bash" : "powershell";
 
-console.log("=== 文件门控与非 shell 能力仍在 ===");
+console.log("=== 缝恒在位：受限壳工具仍注册 ===");
+const shellTool = tools.find((t) => String(t.name) === shellName) as
+  | { execute: (id: string, args: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<unknown> }
+  | undefined;
+assert(shellTool !== undefined, `${shellName} 受限壳仍注册`, tools.map((t) => String(t.name)).join(", "));
 assert(commands["sandbox"] !== undefined, "/sandbox 命令仍注册");
-assert(typeof handlers["tool_call"] === "function", "tool_call 文件门控仍注册");
+assert((handlers.get("tool_call") ?? []).length >= 2, "两条 tool_call 门控都在（文件 + 同类壳）");
 
 console.log("=== session_start：error 通知 + 诚实徽标 ===");
 const ui = {
@@ -80,28 +86,87 @@ const ui = {
   notify: (message: string, type?: string) => { notices.push({ message, type }); },
   select: async () => undefined,
 };
-try {
-  handlers["session_start"]!({}, { cwd: process.cwd(), sessionManager: { getEntries: () => [] }, ui });
-  passed++;
-} catch (error) {
-  failed++;
-  console.error(`  ✗ session_start 异常: ${error instanceof Error ? error.message : String(error)}`);
-}
+const readOnlySession = { cwd: process.cwd(), sessionManager: { getEntries: () => [] }, ui };
+for (const handler of handlers.get("session_start") ?? []) await handler({}, readOnlySession);
 assert(notices.length === 1, "恰发一条通知", `实际 ${notices.length}`);
 const notice = notices[0];
 assert(notice?.type === "error", "通知级别为 error", String(notice?.type));
-assert((notice?.message ?? "").includes("sandbox backend unavailable"), "通知说明后端不可用");
-assert((notice?.message ?? "").includes("not OS-confined"), "通知明说壳未被收敛（不误导为策略拒绝）");
-assert(/node|bwrap/u.test(notice?.message ?? ""), "通知给出修复方向（node / bwrap）");
-// 原因必须来自后端自声明，而不是写死的单一后端文案：
-// win32 → winacl（缺 Node / runner probe 失败）；其他平台 → bwrap。
+assert((notice?.message ?? "").includes("will REFUSE commands"), "通知说明受限壳会拒绝执行（而非'工具没注册'）", (notice?.message ?? "").slice(0, 160));
+assert((notice?.message ?? "").includes("the other shell tool is gated off"), "通知说明未接管的同类壳已被门控");
 if (process.platform === "win32") {
-  assert((notice?.message ?? "").includes("PI_SANDBOX_NODE"), "winacl 失败原因含显式覆盖项（不再是写死的 bwrap 文案）",
-    (notice?.message ?? "").slice(0, 200));
+  assert((notice?.message ?? "").includes("PI_SANDBOX_NODE"), "失败原因来自 winacl 后端自声明", (notice?.message ?? "").slice(0, 200));
 } else {
-  assert((notice?.message ?? "").includes("bwrap"), "bwrap 失败原因由 bwrap 后端自声明", (notice?.message ?? "").slice(0, 200));
+  assert((notice?.message ?? "").includes("bwrap"), "失败原因来自 bwrap 后端自声明", (notice?.message ?? "").slice(0, 200));
 }
 assert(statuses.some((value) => value.includes("(no backend)")), "徽标带 (no backend)", statuses.join(" | "));
+
+console.log("=== confined 档：调用被拒（fail-closed，绝不裸跑）===");
+const execCtx = { cwd: process.cwd(), sessionManager: { getSessionId: () => "spec", getSessionFile: () => undefined } };
+let refusal: unknown;
+try {
+  await shellTool!.execute("tool-call", { command: "echo should-not-run" }, undefined, undefined, execCtx);
+} catch (error) {
+  refusal = error;
+}
+assert(refusal instanceof Error, "read-only 档下调用抛错");
+assert((refusal as { code?: string } | undefined)?.code === "SANDBOX_UNAVAILABLE", "错误码为 SANDBOX_UNAVAILABLE", String((refusal as { code?: string } | undefined)?.code));
+assert(/unconfined/u.test((refusal as Error | undefined)?.message ?? ""), "错误文案声明绝不裸跑", (refusal as Error | undefined)?.message?.slice(0, 160));
+
+console.log("=== danger-full-access：委托 pi 本地 shell 并真的执行 ===");
+/** 折档：执行 session_start 把 store 折到指定档（与真实 pi 的日志折叠同路径）。 */
+async function setMode(mode: string): Promise<void> {
+  const entries = [{ customType: "sandbox-mode", data: { mode } }];
+  for (const handler of handlers.get("session_start") ?? []) {
+    await handler({}, { cwd: process.cwd(), sessionManager: { getEntries: () => entries }, ui });
+  }
+}
+await setMode("danger-full-access");
+let dangerOutput = "";
+try {
+  const result = (await shellTool!.execute(
+    "tool-call",
+    { command: process.platform === "win32" ? "Write-Output danger-ok" : "echo danger-ok" },
+    undefined,
+    (data: unknown) => { dangerOutput += String(data); },
+    execCtx,
+  )) as { content?: { text?: string }[] } | undefined;
+  dangerOutput += JSON.stringify(result ?? {});
+} catch (error) {
+  dangerOutput = `THREW ${error instanceof Error ? error.message : String(error)}`;
+}
+assert(dangerOutput.includes("danger-ok"), "danger 档真的执行了本地 shell", dangerOutput.slice(0, 160));
+
+console.log("=== 未接管的同类壳：confined 档被门控，danger 档放行 ===");
+const gateResultsFor = async (toolName: string): Promise<(unknown)[]> => {
+  const results: (unknown)[] = [];
+  for (const handler of handlers.get("tool_call") ?? []) {
+    results.push(await handler({ type: "tool_call", toolName, input: {} }, {}));
+  }
+  return results;
+};
+// danger 档：放行（用户显式放宽）
+assert((await gateResultsFor(foreignShellName)).every((r) => r === undefined), "danger 档下同类壳未被拦（用户显式放宽）");
+// confined 档：拦下
+await setMode("read-only");
+const blocked = (await gateResultsFor(foreignShellName)).find(
+  (r) => (r as { block?: boolean } | undefined)?.block === true,
+) as { reason?: string } | undefined;
+assert(blocked !== undefined, `confined 档下 ${foreignShellName} 被拦下`);
+assert((blocked?.reason ?? "").includes("not confinement-capable"), "封壳理由说明非收敛能力", (blocked?.reason ?? "").slice(0, 160));
+assert((blocked?.reason ?? "").includes(`use the "${shellName}" tool`), "封壳理由指向受限壳");
+assert((blocked?.reason ?? "").includes("/sandbox"), "封壳理由带上切档出口");
+const ours = (await gateResultsFor(shellName)).filter((r) => r !== undefined);
+assert(ours.length === 0, "我们不重复判自己接管的那一个（交给后端 fail-closed）");
+console.log("=== 文件门控：拒绝文案标注'档位策略拒绝（无 OS 后端）' ===");
+let fileBlock: { block?: boolean; reason?: string } | undefined;
+for (const handler of handlers.get("tool_call") ?? []) {
+  const result = (await handler({ type: "tool_call", toolName: "edit", input: { path: resolve(process.cwd(), "x.txt") } }, {})) as
+    | { block?: boolean; reason?: string }
+    | undefined;
+  if (result?.block === true) fileBlock = result;
+}
+assert(fileBlock !== undefined, "文件门控仍拦下 edit（read-only）");
+assert((fileBlock?.reason ?? "").includes("policy denial — no OS sandbox backend"), "拒绝文案标注档位策略拒绝（非内核拒绝）", (fileBlock?.reason ?? "").slice(0, 200));
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

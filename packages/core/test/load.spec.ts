@@ -30,7 +30,11 @@ if (isWindows) mkdirSync(e2eWorkspace, { recursive: true });
 // mock pi
 const tools: Record<string, unknown>[] = [];
 const commands: Record<string, unknown> = {};
-const handlers: Record<string, (...a: unknown[]) => unknown> = {};
+const handlers = new Map<string, ((...a: unknown[]) => unknown)[]>();
+const onHandler = (name: string, handler: (...a: unknown[]) => unknown): void => {
+  handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+};
+const firstHandler = (name: string): ((...a: unknown[]) => unknown) | undefined => handlers.get(name)?.[0];
 const messages: unknown[] = [];
 const sent: { message: unknown; options: unknown }[] = [];
 const entries: unknown[] = [];
@@ -39,7 +43,7 @@ const pi = {
   registerTool: (t: unknown) => { tools.push(t as Record<string, unknown>); },
   registerCommand: (name: string, spec: unknown) => { commands[name] = spec; },
   registerFlag: () => {},
-  on: (name: string, h: (...a: unknown[]) => unknown) => { handlers[name] = h; },
+  on: onHandler,
   sendMessage: (m: unknown, o?: unknown) => { messages.push(m); sent.push({ message: m, options: o }); },
   appendEntry: (type: string, data: unknown) => { entries.push({ type, data }); },
   setActiveTools: () => {},
@@ -67,12 +71,14 @@ console.log("=== 注册了 /sandbox 命令? ===");
 assert(!!commands["sandbox"], "/sandbox command registered");
 
 console.log("=== tool_call 钩子存在? ===");
-assert(typeof handlers["tool_call"] === "function", "tool_call hook registered");
+assert(typeof firstHandler("tool_call") === "function", "tool_call hook registered");
+// 两条门控：文件（write/edit）+ 未接管的同类壳（不变量 4 的绕过口）
+assert((handlers.get("tool_call") ?? []).length >= 2, "文件门控与同类壳门控都已注册");
 
 console.log("=== session_start 折叠档位 ===");
 const sessionCtx = { cwd: e2eWorkspace, sessionManager: { getEntries: () => [{ customType: "sandbox-mode", data: { mode: "workspace-write" } }] } };
 try {
-  handlers["session_start"]!({}, sessionCtx);
+  firstHandler("session_start")!({}, sessionCtx);
   passed++;
 } catch (e) {
   failed++;
@@ -81,7 +87,7 @@ try {
 
 console.log("=== before_agent_start 返回档位提示段 ===");
 try {
-  const r = handlers["before_agent_start"]!({ systemPrompt: "base" }) as { systemPrompt: string };
+  const r = firstHandler("before_agent_start")!({ systemPrompt: "base" }) as { systemPrompt: string };
   assert(typeof r.systemPrompt === "string" && r.systemPrompt.includes("workspace-write"), "systemPrompt contains policy");
   passed++;
 } catch (e) {
@@ -133,6 +139,26 @@ if (bashTool === undefined) {
 } else {
   console.log("  (bwrap 不可用：跳过分类端到端)");
 }
+
+console.log("=== 同类壳门控（后端可用时也生效）===");
+// 不变量 4 的绕过口：Windows 的受限壳是 powershell，而默认活跃的 git-bash `bash` 不具收敛能力。
+const confinedShell = isWindows ? "powershell" : "bash";
+const foreignShell = isWindows ? "bash" : "powershell";
+const fireToolCall = async (toolName: string): Promise<unknown[]> => {
+  const results: unknown[] = [];
+  for (const handler of handlers.get("tool_call") ?? []) {
+    results.push(await handler({ type: "tool_call", toolName, input: {} }, {}));
+  }
+  return results;
+};
+// 当前折叠档 = workspace-write（session_start 已跑）→ 未接管的同类壳必须被拦下
+const blockedForeign = (await fireToolCall(foreignShell)).find(
+  (r) => (r as { block?: boolean } | undefined)?.block === true,
+) as { reason?: string } | undefined;
+assert(blockedForeign !== undefined, `workspace-write 下 ${foreignShell} 被门控拦下`);
+assert((blockedForeign?.reason ?? "").includes(`use the "${confinedShell}" tool`), "封壳理由指向受限壳");
+assert((await fireToolCall(confinedShell)).every((r) => r === undefined), "接管的受限壳不被此门控拦（交给后端）");
+assert((await fireToolCall("read")).every((r) => r === undefined), "读工具不受同类壳门控影响");
 
 console.log("=== 切档 notice：英文文案 + steer 通道 + display ===");
 try {
