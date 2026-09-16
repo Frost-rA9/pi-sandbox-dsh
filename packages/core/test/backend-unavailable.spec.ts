@@ -32,6 +32,8 @@ const notices: { message: string; type: string | undefined }[] = [];
 const on = (name: string, handler: Handler): void => {
   handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 };
+/** 可观测的模型工具表（对齐 pi 默认活跃集：read/bash/edit/write）。 */
+const activeTools: string[] = ["read", "bash", "edit", "write"];
 const pi = {
   registerTool: (t: unknown) => { tools.push(t as Record<string, unknown>); },
   registerCommand: (name: string, spec: unknown) => { commands[name] = spec; },
@@ -39,8 +41,8 @@ const pi = {
   on,
   sendMessage: () => {},
   appendEntry: () => {},
-  setActiveTools: () => {},
-  getActiveTools: () => [] as string[],
+  setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names); },
+  getActiveTools: () => [...activeTools],
   getFlag: () => undefined,
 } as never;
 
@@ -92,7 +94,14 @@ assert(notices.length === 1, "恰发一条通知", `实际 ${notices.length}`);
 const notice = notices[0];
 assert(notice?.type === "error", "通知级别为 error", String(notice?.type));
 assert((notice?.message ?? "").includes("will REFUSE commands"), "通知说明受限壳会拒绝执行（而非'工具没注册'）", (notice?.message ?? "").slice(0, 160));
-assert((notice?.message ?? "").includes("the other shell tool is gated off"), "通知说明未接管的同类壳已被门控");
+// 未接管的壳：win32 是平台态摘表（工具表里没有 git-bash），Linux 是门控拦下闲置的 powershell。
+const otherShellClause = process.platform === "win32"
+  ? "git-bash (`bash`) is not offered on this host"
+  : "the other shell tool (`powershell`) is gated off";
+assert((notice?.message ?? "").includes(otherShellClause), `通知说明另一个壳的去向（${otherShellClause}）`, (notice?.message ?? "").slice(0, 220));
+if (process.platform === "win32") {
+  assert(!activeTools.includes("bash"), `win32：后端不可用也不让 git-bash 回到工具表（现有: ${activeTools.join(",")}）`);
+}
 if (process.platform === "win32") {
   assert((notice?.message ?? "").includes("PI_SANDBOX_NODE"), "失败原因来自 winacl 后端自声明", (notice?.message ?? "").slice(0, 200));
 } else {

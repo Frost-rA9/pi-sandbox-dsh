@@ -3,8 +3,8 @@
  *
  * 单一参考源 = dsh：连续 agent + 全局沙箱档 + 门控驱动（用户决策点）。
  * 装配：运行时 store（全局档折叠）→ 后端（bwrap/winacl）受限壳工具（**恒注册**；不可用则在调用点 fail-closed）
- * → 文件工具门控（write/edit，被拒即征求批准）→ 未接管的同类壳门控（Windows 的 git-bash `bash`）
- * → `/sandbox` 命令（更宽档需确认）→ 档位提示段。
+ * → 文件工具门控（write/edit，被拒即征求批准）→ 未接管的同类壳：**平台态摘表**（win32 摘 git-bash `bash`）
+ * + `tool_call` 门控兜底 → `/sandbox` 命令（更宽档需确认）→ 档位提示段。
  */
 import {
   createBashTool,
@@ -29,7 +29,7 @@ import {
 import { selectBackend, type SandboxBackend } from "pi-sandbox-dsh-sandbox";
 import { initState, foldSandboxMode, SANDBOX_MODE_ENTRY, type SandboxState } from "./state.ts";
 import { registerFileToolGate } from "./tools-fs.ts";
-import { registerForeignShellGate } from "./tools-shell.ts";
+import { dropUnconfinableShell, registerForeignShellGate } from "./tools-shell.ts";
 
 /**
  * 徽标文案 `[<mode>]`：只读=橙(256色208，pi 主题无橙)、工作区可写=蓝(accent)、全权=红(error)。
@@ -51,10 +51,17 @@ function sandboxBadgeText(theme: Theme, mode: SandboxMode, backendAvailable: boo
   return backendAvailable ? base : `${base} (no backend)`;
 }
 
-/** 后端不可用时的通知文案（英文，对齐通知机制约定）：壳仍在，但会拒绝执行。 */
+/**
+ * 后端不可用时的通知文案（英文，对齐通知机制约定）：壳仍在，但会拒绝执行。
+ * 第二个子句按平台分说：win32 上未接管的 git-bash 已被**平台态摘表**（`setActiveTools`，不是门控）；
+ * Linux 上闲置的 `powershell` 只是被 `tool_call` 门控拦下。
+ */
 function backendUnavailableNotice(detail: string, confinedShell: string): string {
+  const otherShell = confinedShell === "powershell"
+    ? "git-bash (`bash`) is not offered on this host (it cannot run under the restricted token)"
+    : "the other shell tool (`powershell`) is gated off in confined modes";
   return `pi-sandbox-dsh: sandbox backend unavailable — the confined "${confinedShell}" shell will REFUSE commands until this is fixed `
-    + '(it never runs them unconfined), the other shell tool is gated off in confined modes, '
+    + `(it never runs them unconfined), ${otherShell}, `
     + 'and write/edit stay gated by the current mode. '
     + `Reason: ${detail} `
     + 'Fix the backend (Windows: a system `node` + `koffi`; Linux/WSL2: bwrap) or switch to danger-full-access explicitly.';
@@ -109,6 +116,10 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     store.workspaceRoot = ctx.cwd;
     const entries = (ctx.sessionManager?.getEntries?.() ?? []) as readonly unknown[];
     store.mode = foldSandboxMode(entries as never, store.defaultMode);
+    // 平台态壳栈收敛（dsh「one shell stack per host」）：win32 上受限壳是 `powershell`，而 pi 默认活跃的
+    // git-bash `bash` 不具收敛能力（MSYS2 在受限令牌下起不来）→ 把它从**模型工具表**里摘掉。
+    // 与档位无关（同 dsh：壳栈按平台定），故不按档位还原；`tool_call` 门控仍作为兜底。
+    dropUnconfinableShell(pi);
     updateSandboxBadge(ctx.ui);
     // fail-closed 的“可见化”：后端不可用时壳工具根本没注册（pi 内置 shell 仍在，即未被收敛）——
     // 必须显式告知用户，不能让徽标宣称一个没生效的档位。
@@ -156,7 +167,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   // 文件工具（write/edit）门控：被拒即征求用户批准（per-call 升级）
   registerFileToolGate(pi, store, readState, () => store.mode !== "danger-full-access", () => backendError !== undefined);
 
-  // 未接管的同类壳（Windows 的 git-bash `bash`）门控：confined 档下一律拦下（不变量 4 的绕过口）
+  // 未接管的同类壳：**平台态摘表**（win32 摘 git-bash `bash`，在 `session_start` 做）+ 此处门控兜底。
+  // 门控读档位真源：别的扩展 / `--tools` / `defaultTools` 把名字塞回工具表时，confined 档仍在调用点拦下。
   registerForeignShellGate(pi, readState, () => shellName);
 
   // `/sandbox` 命令：显示/切换全局档；更宽档需用户确认（门控/命令驱动、用户决策点）

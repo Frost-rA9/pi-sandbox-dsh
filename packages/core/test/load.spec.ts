@@ -38,16 +38,23 @@ const firstHandler = (name: string): ((...a: unknown[]) => unknown) | undefined 
 const messages: unknown[] = [];
 const sent: { message: unknown; options: unknown }[] = [];
 const entries: unknown[] = [];
+/** 可观测的模型工具表（对齐 pi 默认活跃集：read/bash/edit/write）。 */
+const activeTools: string[] = ["read", "bash", "edit", "write"];
 
 const pi = {
-  registerTool: (t: unknown) => { tools.push(t as Record<string, unknown>); },
+  // 对齐 pi：扩展注册的工具恒为活跃（`defaultTools` 只管内置工具的初值）。
+  registerTool: (t: unknown) => {
+    tools.push(t as Record<string, unknown>);
+    const name = (t as { name?: string }).name;
+    if (name !== undefined && !activeTools.includes(name)) activeTools.push(name);
+  },
   registerCommand: (name: string, spec: unknown) => { commands[name] = spec; },
   registerFlag: () => {},
   on: onHandler,
   sendMessage: (m: unknown, o?: unknown) => { messages.push(m); sent.push({ message: m, options: o }); },
   appendEntry: (type: string, data: unknown) => { entries.push({ type, data }); },
-  setActiveTools: () => {},
-  getActiveTools: () => [] as string[],
+  setActiveTools: (names: string[]) => { activeTools.splice(0, activeTools.length, ...names); },
+  getActiveTools: () => [...activeTools],
   getFlag: () => undefined,
 } as never;
 
@@ -83,6 +90,16 @@ try {
 } catch (e) {
   failed++;
   console.error(`  ✗ session_start 异常: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("=== 平台态壳栈收敛（dsh「one shell stack per host」）===");
+if (isWindows) {
+  assert(!activeTools.includes("bash"), `win32：git-bash 已离开模型工具表（现有: ${activeTools.join(",")}）`);
+  assert(activeTools.includes("read") && activeTools.includes("edit") && activeTools.includes("write"), "只摘壳，其余内置工具不动");
+  assert(activeTools.includes(shellToolName), `win32：受限壳 ${shellToolName} 仍在（缝恒在位）`);
+} else {
+  assert(activeTools.includes("bash"), "linux：bash（受限壳）保留在工具表里");
+  assert(!activeTools.includes("powershell"), "linux：闲置的 powershell 不经 roster 处理（由门控负责）");
 }
 
 console.log("=== before_agent_start 返回档位提示段 ===");
@@ -185,6 +202,8 @@ try {
     entries.some((e) => (e as { type?: string; data?: { mode?: string } }).type === "sandbox-mode" && (e as { data?: { mode?: string } }).data?.mode === "danger-full-access"),
     "切档同时写 sandbox-mode 日志",
   );
+  // danger 档只是"不约束"，不把未接管的壳还回工具表（壳栈按平台定）。
+  if (isWindows) assert(!activeTools.includes("bash"), "win32：danger 档也不把 bash 还回工具表");
 } catch (e) {
   failed++;
   console.error(`  ✗ 切档 notice 异常: ${e instanceof Error ? e.message : String(e)}`);
