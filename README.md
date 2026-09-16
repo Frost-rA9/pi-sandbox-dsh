@@ -43,15 +43,23 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
-On Windows the model's **confined** shell is `pwsh`; the default `bash` tool (git-bash) is not confinement-capable
-(the restricted token cannot run it), so it is **gated off** while a confined mode is active — only
-`danger-full-access` opens both. On Linux the confined shell *is* `bash`, so the same-name override is complete.
-See [docs/architecture.md](docs/architecture.md).
+On Windows the model's shell is **`pwsh` in every mode** — the confined `pwsh` under the restricted token, and the
+local `pwsh` under `danger-full-access`. The default `bash` tool (git-bash) is not confinement-capable: the restricted
+token cannot start MSYS2 at all (its runtime dies at DLL init with `couldn't create signal pipe, Win32 error 5`;
+measured in both confined modes, while native `git.exe`/`node`/`cmd` run fine), so it is **removed from the model's
+tool list** on Windows — dsh's "one shell stack per host" — with the `tool_call` gate kept as a backstop.
+`danger-full-access` does **not** bring `bash` back: it removes confinement, it does not add a shell. Your own `!`
+commands still use git-bash. On Linux the confined shell *is* `bash`, so the same-name override is complete.
+
+Setting `defaultTools: ["read", "powershell", "edit", "write"]` (pi's Windows recipe) is **not needed**: the extension
+removes `bash` itself at `session_start`, which runs before the first model request. Set it only if you also want the
+built-in `bash` gone in sessions where this extension is not mounted.
 
 Windows prerequisites: a system `node` (the Bun host cannot run the Win32 runner subprocess — resolved from
 `PI_SANDBOX_NODE`, then `PATH`, then the user/system registry `Path`) and the `koffi` optional dependency installed
-by `npm install`. Under the restricted token PowerShell runs in `ConstrainedLanguage` mode (no .NET method calls) —
-an inherent cost of the mechanism.
+by `npm install`. Under `read-only`, PowerShell runs in `ConstrainedLanguage` mode (no .NET method calls — its startup
+AppLocker probe cannot write its temp files); `workspace-write` has a private temp directory, so the probe completes
+and the mode stays `FullLanguage` (measured).
 
 See [docs/architecture.md](docs/architecture.md) for the architecture, design invariants, and known trade-offs.
 

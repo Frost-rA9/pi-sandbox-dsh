@@ -43,13 +43,19 @@
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
-Windows 上模型可用的**受限**壳是 `pwsh`；默认的 `bash` 工具（git-bash）不具收敛能力（受限令牌跑不了它），
-因此在 confined 档被**门控拦下**——只有 `danger-full-access` 才两者都放开。Linux 的受限壳本身就是 `bash`，
-故同名覆盖完整、无此问题。
+Windows 上模型的壳**全程都是 `pwsh`**：受限档位下是受限令牌里的 `pwsh`，`danger-full-access` 下是本机 `pwsh`。
+默认的 `bash` 工具（git-bash）不具收敛能力——受限令牌**跑不起来** MSYS2：其运行时在 DLL 初始化阶段就死在
+`couldn't create signal pipe, Win32 error 5`（read-only 与 workspace-write 两档实测同错，而原生 `git.exe`/`node`/`cmd` 正常）。
+因此按 dsh「one shell stack per host」把 `bash` 从**模型工具表**里摘掉（`setActiveTools`），`tool_call` 门控保留作兜底：
+`danger-full-access` 不把 `bash` 拿回来——它只去掉约束，不增一个壳。你自己敲的 `!` 命令仍走 git-bash。
+Linux 的受限壳本身就是 `bash`，同名覆盖完整、无此问题。
+
+配 `defaultTools: ["read", "powershell", "edit", "write"]`（pi 的 Windows 配方）**并不必要**：扩展自己在 `session_start`
+就把 `bash` 摘掉了，而它跑在第一个模型请求之前。只有当你还想在不挂本扩展的会话里也不要有内置 `bash` 时才需要配。
 
 Windows 前置：系统 `node`（Bun 宿主不能跑 Win32 runner 子进程；解析顺序 `PI_SANDBOX_NODE` → `PATH` → 用户/系统注册表
-`Path`）与 `npm install` 装上的 `koffi`（optionalDependency）。受限令牌下 PowerShell 运行在 `ConstrainedLanguage`
-（.NET 方法调用被禁）——机制固有代价。
+`Path`）与 `npm install` 装上的 `koffi`（optionalDependency）。`read-only` 档下 PowerShell 运行在 `ConstrainedLanguage`
+（.NET 方法调用被禁；其预置探测需要写临时文件）；`workspace-write` 有私有临时目录，探测能完成 → 保持 `FullLanguage`（实测）。
 
 架构、不变量与已知取舍见 [docs/architecture.md](docs/architecture.md)。
 
