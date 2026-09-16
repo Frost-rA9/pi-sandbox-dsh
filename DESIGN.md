@@ -68,13 +68,13 @@
 1. **沙箱管写面，不管读面**——读全开；凭据靠"写面 + 网络出口"约束，不靠藏读。
 2. **档位 = 全局持续状态，不与任何阶段绑定**；无子档。
 3. **批准 = 逐级升级（严格更宽）**，不是每命令弹窗、不是命令白名单。
-4. **fail-closed**——confined 档无后端 → 拒绝（`SANDBOX_UNAVAILABLE`），绝不静默降级成无沙箱；升级非严格更宽 → 不弹窗。**后端不可用必须可见**（见不变量 10）。
+4. **fail-closed = 缝恒在位、不可用即拒**（不是“工具消失”）—— 受限壳工具**恒注册**（Linux=`bash` 覆盖内置；Windows=`powershell`）；`confined` 档下后端不可用 / runner 起不来 → **调用点**抛 `SANDBOX_UNAVAILABLE`，**绝不裸跑**；只有 `danger-full-access` 才委托 pi 本地 shell（用户显式决策）。**未接管的同类 shell 名字**（Windows 的 git-bash `bash`）在 confined 档由 `tool_call` 门控**封住**，不得成为绕过口。升级非严格更宽 → 不弹窗；后端不可用必须可见（不变量 10）。
 5. **批准不进模型上下文**；文件工具升级仅作用于本次调用（per-call，门控放行）；bash 升级为全局 `/sandbox`（持久档，更宽档经确认）。
 6. **状态 = 日志折叠，禁内存真源**。
 7. **最小暴露面**——凭据 / 敏感目录不因"读隐藏"而特殊处理；如需约束，用写面 + 网络出口，而非藏读或 deny-read 名单。
 8. **切换/升级告知 = 通知机制**（英文文案，对齐 plan 侧）。**pi 需要它而 dsh 不需要**：pi 的档位提示段由 `before_agent_start` **每用户轮**静态拼接（本轮内不再重建），dsh 的 `sandbox:policy` 是 systemPrompt.context 的 **text 回调**、每次 assembly 动态求值（`sandbox-policy/src/index.ts:140-152`），故 dsh 的 `sandbox/mode` 保持 log-only、**从不进模型 transcript**（`session-mode.ts:27-38`）；pi 移植用一条 steer notice 补偿该时机差。
 9. **结果侧分类 = 事实判定，不是猜测**：只有 **runner 失败规则命中** 才升级为 `SANDBOX_UNAVAILABLE`；只有 **非零退出（signal 死亡不算）+ 本后端 denial 方言命中** 才追 denial 标记；runner 失败优先于 denial（互斥，不同时出现）；`danger-full-access` 无后端事实 → 不做任何判定。**denial 标记只进工具结果、不进 system prompt**。
-10. **后端不可用必须可见（不假收敛）**：`probe()` 失败 → **不注册**受限 shell 工具（pi 内置 shell 仍在，即未被收敛），并在 `session_start` 发一条 **error 级通知（英文）**说明“壳未收敛+修复方向”，footer 徽标追加 `(no backend)`。理由：不变量 4 的“不静默降级”不只是不裸跑，也包括**不让用户/模型看到一个已经生效的档位徽标**。
+10. **后端不可用必须可见（不假收敛）**：`probe()` 失败**不改变工具面**（受限壳仍在、`danger-full-access` 仍可用），但必须在 `session_start` 发一条 **error 级通知（英文）**：说明“受限壳会拒绝执行 / 未接管的同类 shell 已被门控 / 修复方向 + `/sandbox danger-full-access` 出口”，footer 徽标追加 `(no backend)`；文件门控的拒绝文案在无后端时标注“这是档位策略拒绝，不是内核拒绝”。理由：不变量 4 的“不静默降级”不只是不裸跑，也包括**不让用户/模型误判是哪一层在拦**。
 
 ## 七、已知取舍（接受并文档化）
 
@@ -83,7 +83,7 @@
 - **计划性工作流不在本扩展内**：本扩展只做"写面沙箱 + 逐级批准"；"读资料→出计划→批准执行"这类工作流由独立扩展承担。
 - **winacl enforcement=partial**（Everyone 保留 / 硬链接 / 同身份读限制）：进入 read-only / workspace-write 需 notice 明示。
 - **Windows 沙箱档 shell=pwsh**（受限令牌 × git-bash 不兼容）；Linux/WSL2 用 bwrap、shell=bash。
-- **winacl 依赖 koffi（原生 FFI），Bun 宿主不能加载** → 独立 Node runner 子进程承载；加载前 fail-closed 降级。
+- **winacl 依赖 koffi（原生 FFI），Bun 宿主不能加载** → 独立 Node runner 子进程承载；koffi 缺失 → 调用点 fail-closed（受限壳拒绝执行，不裸跑）。
 - **网络默认不掺和**（对齐 dsh "network outside vocabulary"）：本扩展不提供网络档位。
 - **不支持命令白名单**——明确拒绝字符串匹配（误判膨胀）。
 - **`user_bash`（`!` / `!!`）不在本扩展约束内（边界声明）**：pi 的用户命令走独立缝（默认 pi 本地 bash operations），不经本扩展注册的 shell 工具。用户自己的动作不是"模型写面"（dsh 对应物是用户直接操作宿主，同样不经档位）——不引入拦截，保持最小暴露面。
@@ -98,13 +98,14 @@
 - **winacl 每命令一个 runner 子进程**：宿主（Bun）不能加载 koffi → 不能持有 grant 生命周期，temp grant 按次物化/撤销（工作区 ACE 幂等复用）；净开销 ≈ 80–100 ms/命令。
 - **winacl 残留私有 temp 目录靠“下次调用”清扫，不是即时清理**：宿主超时/中止会 kill runner（`finally` 不跑）→ 目录与 ACE 留在 `%TEMP%`。补偿：每次 runner 调用开头先 `sweepStaleTempDirs`——只碰 `pi-sandbox-dsh-` 前缀；活体由**占用锁**判定（`temp-lock.ts`：先取锁再建目录 → 拿得到锁=死主，`ERROR_LOCK_VIOLATION`=活体），无锁文件的产物另需 5 min 年龄门槛；`%TEMP%/pi-sandbox-dsh-locks/` 为常驻锁目录（与 `pi-sandbox-dsh-acl-locks/` 同类设计产物）。清扫失败只告警，**不进 runner 失败契约**（退出码 127 只留给真正的失败）。
 - **winacl 超时/中止会绕过清理**：宿主 kill runner 时其 finally 不执行，`%TEMP%` 会留下一个 `pi-sandbox-dsh-*` 私有目录及其 ACE（工作区 standing ACE 不受影响）。
-- **winacl 依赖 PATH 里的系统 `node`（runner 子进程）**：宿主是 Bun → runner 必须跑在系统 Node 上。**解析不只看 PATH**：`PI_SANDBOX_NODE`（显式覆盖）→ `PATH` → Windows 注册表 `Path`（用户/系统，覆盖 "pi 由陈旧终端启动、进程持有过期 PATH" 这一真机故障）；全部失败才 fail-closed。`PI_SANDBOX_NODE` 设置了但不可用 → 直接失败（不静默换别的）。
-- **probe 失败原因由后端自声明**（`SandboxBackendInfo.detail`）：bwrap 缺依赖 / winacl 缺 Node / runner probe 失败各有自己的文案，宿主不再写死某一后端的原因（否则 winacl 失败会报成 bwrap）。
+- **probe 只负责“可见性”，不再是“有没有壳”的判据**：可用性判定落在调用点（对齐 dsh：winacl rung 连 probe 都不做，靠 runner 失败签名 `windows-acl-run:` + exit 127 fail-closed）。pi 侧仍需装载期 probe 来出通知/徽标，但它不再决定工具注册与否。
+- **未接管的同类 shell 名字由 `tool_call` 门控封住（Windows 特有）**：pi 默认活跃的壳工具名是 `bash`（`defaultActiveTools = [read,bash,edit,write]`），而受限令牌×git-bash 不兼容 → Windows 的受限壳只能叫 `powershell`（**不同名 ⇒ 覆盖不完整**，内置 `bash` 仍活跃且无约束）。故 confined 档下把“本后端未接管”的那个壳名字（`bash`/`powershell`）用门控拦下（理由带档位 + 建议用受限壳/切档）。Linux 无此问题：受限壳正好叫 `bash`，同名覆盖即完成；内置 `powershell` 不在默认 active 且非 win32 调用即抛错。
+- **winacl 依赖系统 `node`（runner 子进程）**：宿主是 Bun → runner 必须跑在系统 Node 上。**解析不只看 PATH**：`PI_SANDBOX_NODE`（显式覆盖）→ `PATH` → Windows 注册表 `Path`（用户/系统，覆盖 "pi 由陈旧终端启动、进程持有过期 PATH" 这一真机故障）；全部失败 → 调用点 fail-closed（**壳还在，但会拒绝**）。
 - **devDep ≥ 0.84.4**（0.84.1 不导出 `createPowerShellTool`）。
 
 ## 八、验证与规模
 
 - `npm run typecheck`（strict，全部 workspace）。
-- `npm test`：core 档位折叠 / 严格更宽判定 / escalate 批准流（allowed-once / rejected / cancelled / unavailable / 非更宽）/ fail-closed / denial+hint 标记 / **后端不可用的可见化**（不注册 shell 工具 + error 通知（原因来自后端自声明）+ `(no backend)` 徽标）；sandbox `selectBackend` / bwrap / winacl 签名 / **结果侧分类**（runner 失败优先、denial 需非零退出、signal 死亡不判定、danger 不判定、分类窗口有界）/ **残留 temp 目录清扫策略**（死主 vs 活体 vs 无锁年龄门槛、ownDir 排除、probe 抛错隔离）/ **runner Node 解析纯函数**（Windows/POSIX 分隔符、去重、去引号）。
+- `npm test`：core 档位折叠 / 严格更宽判定 / escalate 批准流（allowed-once / rejected / cancelled / unavailable / 非更宽）/ fail-closed / denial+hint 标记 / **后端不可用的可见化**（受限壳仍在但调用被拒 + 未接管的同类 shell 被门控 + error 通知（原因来自后端自声明）+ `(no backend)` 徽标 + 无后端时的文件拒绝文案）；sandbox `selectBackend` / bwrap / winacl 签名 / **结果侧分类**（runner 失败优先、denial 需非零退出、signal 死亡不判定、danger 不判定、分类窗口有界）/ **残留 temp 目录清扫策略**（死主 vs 活体 vs 无锁年龄门槛、ownDir 排除、probe 抛错隔离）/ **runner Node 解析纯函数**（Windows/POSIX 分隔符、去重、去引号）。
 - `npm run probe`（真机）：Linux/WSL2 = bwrap `--version`；Windows = runner capability（koffi/令牌/默认 DACL/Job）+ 残留清扫（死主被删 / 活体与太新保留）+ read-only 写被拒/读全开 + workspace-write 工作区内可写/工作区外被拒 + 工作区 ACE 幂等（仅 1 条）+ temp 目录无残留。
 - 规模参考：约 3 个包，src 控制在 ~2000 行内（核心小）。

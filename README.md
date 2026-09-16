@@ -43,6 +43,11 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 | Linux / WSL2 | bubblewrap | bash |
 | Windows | restricted-token + NTFS ACE (winacl) | pwsh |
 
+On Windows the model's **confined** shell is `pwsh`; the default `bash` tool (git-bash) is not confinement-capable
+(the restricted token cannot run it), so it is **gated off** while a confined mode is active — only
+`danger-full-access` opens both. On Linux the confined shell *is* `bash`, so the same-name override is complete.
+See [docs/verify-windows.md](docs/verify-windows.md).
+
 Windows prerequisites: a system `node` (the Bun host cannot run the Win32 runner subprocess — resolved from
 `PI_SANDBOX_NODE`, then `PATH`, then the user/system registry `Path`) and the `koffi` optional dependency installed
 by `npm install`. Under the restricted token PowerShell runs in `ConstrainedLanguage` mode (no .NET method calls) —

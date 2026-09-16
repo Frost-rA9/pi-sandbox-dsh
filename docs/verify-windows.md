@@ -8,7 +8,13 @@
 
 ## 0. 目标机制（对齐 dsh）
 
-Windows 用 **`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单**，shell=`pwsh`（受限令牌 × git-bash 不兼容）。
+Windows 用 **`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单**，受限壳=`pwsh`（受限令牌 × git-bash 不兼容）。
+
+> ⚠️ 壳名字与“另一个壳”：pi 默认活跃的壳工具名是 `bash`（`defaultActiveTools = [read,bash,edit,write]`），
+> 而受限令牌跑不了 git-bash → Windows 的受限壳只能叫 **`powershell`**（**不同名 ⇒ 同名覆盖不完整**）：
+> 内置 `bash`（git-bash，无约束）仍活跃 → **必须在 confined 档用 `tool_call` 门控拦下**（不变量 4）。
+> Linux 无此问题：受限壳正好叫 `bash`，同名覆盖即完成；内置 `powershell` 不在默认 active 且非 win32 调用即抛错。
+> 真机实测（pi SDK in-memory 会话 + `emitToolCall`）：`gate bash → {block:true, reason:"[sandbox: the 'bash' shell is not confinement-capable …]}`；受限壳不被此门控拦。
 - 令牌 restricting-SID 列表：read-only=`[logon SID, EVERYONE]`；workspace-write=加 `workspaceWriteSid` + `tempWriteSid`。
 - 权限**两次检查**（普通 SID + restricting SID），只允许列表 SID 写。
 - **读不受限**（网络同理，受限令牌不碰网络）。
@@ -85,6 +91,7 @@ npm run probe       # 12 passed, 0 failed
 | workspace-write：写工作区外 | 被拒 |
 | grant 生命周期 | 两次 grant 后工作区仅 **1 条** capability ACE（幂等）；runner 私有 temp 无残留（锁目录不计）|
 | 残留清扫 | 无锁+老 mtime 的目录被删；无锁但新建的保留；**真持锁**的活体目录保留（跨进程锁判定）|
+| 壳缝（不变量 4） | 受限壳工具**恒注册**；未接管的同类壳（Windows 的 `bash`）在 confined 档被门控拦下（理由带档位+建议壳+`/sandbox` 出口）；后端不可用时**调用被拒**（`SANDBOX_UNAVAILABLE` + 精确原因），**绝不裸跑**；`danger-full-access` 下同一工具委托 pi 本地 shell 并真执行 |
 | runner Node 解析 | 在“独立登录环境且 PATH 无 node”（计划任务复现）下仍能解析到注册表 `Path` 里的 node → 注册受限 `powershell` 工具、**无通知**；`PI_SANDBOX_NODE` 指向不可用时给出精确原因 |
 | read-only 不带写能力 | 工作区 standing ACE 保留但不生效 |
 
@@ -129,6 +136,11 @@ confined 命令 → workspace-write 内写成功、外写拿到 `[sandbox: file 
   （英文，说明“壳未收敛”与修复方向）+ 徽标追加 `(no backend)`（对齐 DESIGN 不变量 10）。
 
 ---
+
+> **壳面（不变量 4）**：受限壳工具**恒在位**（不可用即拒，不再“不注册”）；Windows 上内置 `bash`（git-bash）在 confined 档被
+> `tool_call` 门控拦下——**模型在 confined 档只能用受限 `powershell`**（`danger-full-access` 才两者都放开；用户自己的 `!` 命令不走此门控，属 DESIGN 已声明的边界）。
+> 真机验证法（不需调模型）：pi SDK 开 in-memory 会话 → `session["_extensionRunner"].emitToolCall({type:"tool_call",toolName:"bash",…})` 看 `{block,reason}`；
+> `session["_toolRegistry"].get("powershell").execute(…)` 看真机受限执行；配合 `PI_SANDBOX_NODE=<不存在>` 验证 fail-closed 拒绝。
 
 ## 5. 回归（Windows）
 
