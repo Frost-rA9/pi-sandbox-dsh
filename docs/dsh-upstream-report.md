@@ -2,11 +2,30 @@
 
 **Target**: dsh `packages/sandbox/sandbox-windows-acl` (anchor `ddefc45fbc`; local clone verified at `0d1f50007`, 2026-09-15).
 **Measured on**: Windows 11 build 26200, 2026-09-20, Node 24, the shipped koffi binding path.
-**Status**: self-archived reference — **not** filed upstream, and not planned to be. The upstream repo
-`deepseek-ai/deepseek-harness` has Issues disabled and its `CONTRIBUTING.md` states that external pull requests are not
-accepted; the sanctioned channel is GitHub Discussions. This file therefore serves as (a) the port's own evidence record
-for future sessions and (b) a ready-to-reuse write-up if a Discussion post is ever wanted. The port (`pi-sandbox-dsh`)
-pins these findings in `npm run probe` (the 「HTTPS」 section), so nothing here needs re-deriving.
+**Status**: self-archived reference — **not filed upstream, and nothing here needs filing**. Two separate reasons:
+
+1. The upstream repo `deepseek-ai/deepseek-harness` has Issues disabled and its `CONTRIBUTING.md` states that external
+   pull requests are not accepted (sanctioned channel: GitHub Discussions).
+2. **The finding is already reported upstream, many times over.** A Discussions search (authenticated `gh api graphql`,
+   2026-09-20) returns 27 hits for `schannel` / 19 for `SEC_E_NO_CREDENTIALS`, including at least these eight
+   duplicates: **#986, #1789, #2120, #2184, #2850, #3207, #4163, #6403**. `#2120` ("Windows sandbox
+   (dsh-sandbox-windows-acl): WRITE_RESTRICTED token breaks Schannel TLS for native HTTPS clients (curl / git /
+   Invoke-WebRequest)", 0 comments) already contains the same client matrix, the same flag list, a bisection table with
+   the decisive *"add user SID / BUILTIN\Users / INTERACTIVE / Authenticated Users / SYSTEM to the restricting list →
+   still exit 35"* row, the same conclusion ("the `WRITE_RESTRICTED` flag is … the cause"), and the same workarounds
+   (`node` / `python` / `git -c http.sslBackend=openssl`).
+
+So this file is **a local evidence record and an index of the upstream threads**, not a contribution. It exists so a
+future session does not re-derive §1 from scratch or mistake our port for the origin of the behaviour. The port
+(`pi-sandbox-dsh`) pins the boundary in `npm run probe` (the 「HTTPS」 section) and states the exits in the mode prompt
+segment. The upstream README still claims network is unrestricted and the suite still has no https assertion — i.e. it is
+**known upstream and unfixed** (not mis-diagnosed by us, and not fixed by them).
+
+Candidate increments over #2120 (only these, and they are small):
+
+- the negative result that granting the CNG key-container directory (`%APPDATA%\Microsoft\Crypto\Keys`) a per-session
+  create-only ACE does **not** change the failure (see §1), which rules out the "just grant the key store" fix;
+- §2's separate failure class (component-created DACL) — a different root cause from the Schannel one.
 
 ## 1. `WRITE_RESTRICTED` breaks Schannel credential acquisition (mechanism level)
 
