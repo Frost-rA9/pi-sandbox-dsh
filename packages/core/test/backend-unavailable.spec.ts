@@ -55,19 +55,28 @@ const savedNodeOverride = process.env.PI_SANDBOX_NODE;
 for (const key of pathKeys) process.env[key] = "";
 // 显式覆盖指向不存在的 Node：保证确定性失败（否则 Windows 会从注册表 Path 里找到 node）。
 process.env.PI_SANDBOX_NODE = resolve(process.cwd(), "no-such-node-binary.exe");
-try {
-  sandboxExtension(pi);
-  passed++;
-} catch (error) {
-  failed++;
-  console.error(`  ✗ 实例化抛异常: ${error instanceof Error ? error.message : String(error)}`);
-} finally {
+/**
+ * 复原被清空的 PATH / PI_SANDBOX_NODE。
+ * **必须在 confined 调用断言之后才调用**：探针与调用点都要看到“后端不可用”，
+ * 否则调用点会重新找到 bwrap，命令被正常收敛执行，本 spec 的 fail-closed 断言就会落空
+ * （复原过早 = 只验证到探针阶段，不是后端不可用时的行为）。
+ */
+function restoreEnv(): void {
   for (const [key, value] of savedPathValues) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
   if (savedNodeOverride === undefined) delete process.env.PI_SANDBOX_NODE;
   else process.env.PI_SANDBOX_NODE = savedNodeOverride;
+}
+
+try {
+  sandboxExtension(pi);
+  passed++;
+} catch (error) {
+  failed++;
+  console.error(`  ✗ 实例化抛异常: ${error instanceof Error ? error.message : String(error)}`);
+  restoreEnv(); // 实例化失败则无后续用例，立即复原
 }
 
 const shellName = process.platform === "win32" ? "powershell" : "bash";
@@ -120,6 +129,9 @@ try {
 assert(refusal instanceof Error, "read-only 档下调用抛错");
 assert((refusal as { code?: string } | undefined)?.code === "SANDBOX_UNAVAILABLE", "错误码为 SANDBOX_UNAVAILABLE", String((refusal as { code?: string } | undefined)?.code));
 assert(/unconfined/u.test((refusal as Error | undefined)?.message ?? ""), "错误文案声明绝不裸跑", (refusal as Error | undefined)?.message?.slice(0, 160));
+
+// 到此 fail-closed 断言已完成：复原环境，后续 danger 档用例需要真实 PATH 才能跑本地 shell。
+restoreEnv();
 
 console.log("=== danger-full-access：委托 pi 本地 shell 并真的执行 ===");
 /** 折档：执行 session_start 把 store 折到指定档（与真实 pi 的日志折叠同路径）。 */
