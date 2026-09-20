@@ -25,8 +25,6 @@ export interface StartupInfoInput {
   hStdInput: NativePtr;
   hStdOutput: NativePtr;
   hStdError: NativePtr;
-  /** Initial console window visibility; only read when `STARTF_USESHOWWINDOW` is set in `dwFlags`. */
-  wShowWindow?: number;
   cbReserved2?: number;
   lpReserved2?: NativePtr;
 }

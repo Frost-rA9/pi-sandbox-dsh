@@ -192,9 +192,7 @@ export function spawnPipedProcess(
     startupInfo = allocStartupInfo();
     encodeStartupInfo(startupInfo, {
       cb: abi.STARTUPINFOW_SIZE,
-      // 初始 console 窗口隐藏：不用 CREATE_NO_WINDOW（受限令牌下 DLL 初始化会失败）。
-      dwFlags: abi.STARTF_USESTDHANDLES | abi.STARTF_USESHOWWINDOW,
-      wShowWindow: abi.SW_HIDE,
+      dwFlags: abi.STARTF_USESTDHANDLES,
       hStdInput: stdIn.read,
       hStdOutput: stdOut.write,
       hStdError: stdErr.write,
@@ -367,9 +365,7 @@ function spawnJobProcess(
     startupInfo = allocStartupInfo();
     encodeStartupInfo(startupInfo, {
       cb: abi.STARTUPINFOW_SIZE,
-      // 初始 console 窗口隐藏：不用 CREATE_NO_WINDOW（受限令牌下 DLL 初始化会失败）。
-      dwFlags: abi.STARTF_USESTDHANDLES | abi.STARTF_USESHOWWINDOW,
-      wShowWindow: abi.SW_HIDE,
+      dwFlags: abi.STARTF_USESTDHANDLES,
       hStdInput: stdio.stdin,
       hStdOutput: stdio.stdout,
       hStdError: stdio.stderr,
