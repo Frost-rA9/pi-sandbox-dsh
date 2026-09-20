@@ -5,11 +5,11 @@
  * - Linux/WSL2：bwrap 可用性（完整 e2e 在 `test/bwrap-e2e.spec.ts`）。
  * - Windows：winacl runner 能力探针 + 受限令牌往返 —— read-only 写被拒 / 读全开；
  *   workspace-write 写工作区成功、写工作区外被拒；工作区 ACE 幂等保留（standing reuse cache），
- *   runner 退出后自建的私有 temp 目录不残留。
+ *   runner 退出后自建的私有 temp 目录不残留；Schannel TLS 的机制级已知边界（下面「HTTPS」节）。
  *
  * 退出码 0 = 全部通过；1 = 有失败（fail-closed：探针失败即视为后端不可用）。
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -46,6 +46,49 @@ function runRunner(args: readonly string[]): { status: number | null; output: st
 function pwshCommand(body: string): string[] {
   const shell = getPowerShellConfig();
   return [shell.shell, ...shell.args, body];
+}
+
+/** 系统 curl（Win10 1803+ 自带，Schannel 客户端）：验证受限子进程能不能建成 TLS 凭据。 */
+const SYSTEM_CURL = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "curl.exe");
+
+/** Schannel 凭据失败签名：英文前缀与错误码是稳定锚点（系统文案本地化不影响）。 */
+const CREDENTIAL_FAILURE = /schannel|SEC_E_NO_CREDENTIALS|0x8009030e/iu;
+
+/** 同步问内核要一个空闲的 loopback 端口（子进程自己 close，端口随后交给下面的监听）。 */
+function freeLoopbackPort(): number | undefined {
+  const result = spawnSync(process.execPath, ["-e",
+    "const s=require('node:net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})",
+  ], { encoding: "utf8", timeout: 20_000 });
+  const port = Number((result.stdout ?? "").trim());
+  return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+/**
+ * 起一个本机明文 TCP 汇（sink），让「Schannel 凭据失败」的判定**不依赖外网/代理/对端是否真在说 TLS**。
+ *
+ * 必要性（实测）：curl 只在 **TCP 连上之后**才去取 Schannel 凭据 —— 直连被拒时它 exit 7
+ * （curl: (7) Failed to connect）压根到不了 TLS 那一步，凭据失败就观测不到；走 HTTP 代理时
+ * CONNECT 隧道一建成它就立刻报凭据错。所以用本机监听把「连得上」这个前提固定下来：
+ * 受限令牌下必报凭据错；将来若被修好，错误签名会变成握手层（断言随之翻转）。
+ * @returns 端口与终止函数（undefined = 监听没起来，调用方改为仅报告）。
+ */
+function startLoopbackTlsSink(): { port: number; stop: () => void } | undefined {
+  const port = freeLoopbackPort();
+  if (port === undefined) return undefined;
+  // 汇自戕（20s 后自己退出）：即使探针崩溃也不会留下长期监听的孤儿进程。
+  const sink = spawn(process.execPath, ["-e",
+    `const s=require('node:net').createServer(c=>c.on('error',()=>{}));s.on('error',()=>process.exit(1))`
+    + `.listen(${String(port)},'127.0.0.1',()=>setTimeout(()=>process.exit(0),20000))`,
+  ], { stdio: "ignore" });
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const ready = spawnSync(process.execPath, ["-e",
+      `require('node:net').connect(${String(port)},'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))`,
+    ], { timeout: 10_000 });
+    if (ready.status === 0) return { port, stop: () => { sink.kill(); } };
+    spawnSync(process.execPath, ["-e", "setTimeout(()=>{},100)"], { timeout: 10_000 });
+  }
+  sink.kill();
+  return undefined;
 }
 
 /** 工作区 DACL 里 capability SID ACE 的条数（icacls 对无法解析的 SID 打印 `S-1-4-…`）。 */
@@ -131,6 +174,55 @@ function probeWindows(): void {
       ...pwshCommand(`Set-Content -LiteralPath '${outsidePath}' -Value escaped -ErrorAction Stop`),
     ]);
     assert(wwOutside.status !== 0, "workspace-write：写工作区外被拒（非零退出）", `status=${String(wwOutside.status)}`);
+
+    console.log("=== winacl · 受限令牌下的 HTTPS（Schannel 机制级边界）===");
+    if (!existsSync(SYSTEM_CURL)) {
+      console.log(`  · 未找到 ${SYSTEM_CURL} → 跳过 TLS 断言`);
+    } else {
+      // 机制级已知边界（2026-09-20 真机实测）：WRITE_RESTRICTED 标志**本身**就让 Schannel 的
+      // AcquireCredentialsHandle 报 SEC_E_NO_CREDENTIALS。拆解证据（同一脚本逐个改 CreateRestrictedToken 入参）：
+      //   flags=0x5（DISABLE_MAX_PRIVILEGE|LUA，不带 WRITE_RESTRICTED）→ TLS 正常；
+      //   flags=0xD + [logon SID, Everyone] → 凭据失败；
+      //   flags=0xD + [logon SID, Everyone, **用户自己的 SID**] → 仍失败。
+      // 即把「用户能写的都算能写」也救不回来 → 不是缺写 ACE，补文件/注册表白名单修不了
+      // （实测旁证：给 CNG 密钥目录 %APPDATA%\Microsoft\Crypto\Keys（Schannel 落密钥容器的地方）
+      //  按会话授予 create-only ACE 后，TLS 依旧失败；该改动用不上，已回退）。
+      const sink = startLoopbackTlsSink();
+      if (sink === undefined) {
+        console.log("  · 本机汇监听未起来 → 跳过 Schannel 断言");
+      } else {
+        try {
+          for (const mode of ["workspace-write", "read-only"] as const) {
+            const tls = runRunner([
+              "--workspace", workspace, "--temp", tempRoot, "--mode", mode, "--",
+              SYSTEM_CURL, "-sS", "--noproxy", "*", "--max-time", "8", "-o", "NUL", "-w", "code=%{http_code}",
+              `https://127.0.0.1:${String(sink.port)}/`,
+            ]);
+            assert(CREDENTIAL_FAILURE.test(tls.output),
+              `${mode}：Schannel 不可用（机制级边界：WRITE_RESTRICTED 自身所致，非缺写授权）`,
+              tls.output.trim().split(/\r?\n/u)[0]);
+          }
+        } finally {
+          sink.stop();
+        }
+      }
+
+      // 正向对照：自带 TLS 实现的栈（node/OpenSSL）在受限子进程内不受影响 —— 网络面确实未被约束。
+      // 这一步需要外网；无外网/无代理时只报告，不判失败。
+      const nodeTls = runRunner([
+        "--workspace", workspace, "--temp", tempRoot, "--mode", "workspace-write", "--",
+        process.execPath, "-e",
+        "require('node:https').get('https://api.github.com/',r=>{console.log('NODE-TLS-OK',r.statusCode);process.exit(0)})"
+          + ".on('error',e=>{console.log('NODE-TLS-ERR',e.code||e.message);process.exit(0)})",
+      ]);
+      const nodeCode = /NODE-TLS-OK (\d{3})/u.exec(nodeTls.output)?.[1];
+      if (nodeCode === undefined) {
+        console.log(`  · 非 Schannel 对照未取到结果（无外网/无代理）→ 仅报告：${nodeTls.output.trim().split(/\r?\n/u)[0]}`);
+      } else {
+        assert(/^[1-5]\d\d$/u.test(nodeCode),
+          "workspace-write：非 Schannel 栈（node/OpenSSL）在受限子进程内可完成 HTTPS", `code=${nodeCode}`);
+      }
+    }
 
     console.log("=== winacl · 受限令牌下的 PowerShell 语言模式（已知边界，仅报告）===");
     const languageMode = runRunner([
