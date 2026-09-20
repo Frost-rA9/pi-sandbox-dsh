@@ -2,8 +2,11 @@
 
 **Target**: dsh `packages/sandbox/sandbox-windows-acl` (anchor `ddefc45fbc`; local clone verified at `0d1f50007`, 2026-09-15).
 **Measured on**: Windows 11 build 26200, 2026-09-20, Node 24, the shipped koffi binding path.
-**Status**: draft for an upstream issue. The port (`pi-sandbox-dsh`) pins these findings in `npm run probe`
-(「HTTPS」section); this file exists so the report can be filed without re-deriving the evidence.
+**Status**: self-archived reference — **not** filed upstream, and not planned to be. The upstream repo
+`deepseek-ai/deepseek-harness` has Issues disabled and its `CONTRIBUTING.md` states that external pull requests are not
+accepted; the sanctioned channel is GitHub Discussions. This file therefore serves as (a) the port's own evidence record
+for future sessions and (b) a ready-to-reuse write-up if a Discussion post is ever wanted. The port (`pi-sandbox-dsh`)
+pins these findings in `npm run probe` (the 「HTTPS」 section), so nothing here needs re-deriving.
 
 ## 1. `WRITE_RESTRICTED` breaks Schannel credential acquisition (mechanism level)
 
