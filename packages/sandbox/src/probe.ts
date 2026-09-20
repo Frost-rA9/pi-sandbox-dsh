@@ -175,7 +175,7 @@ function probeWindows(): void {
     ]);
     assert(wwOutside.status !== 0, "workspace-write：写工作区外被拒（非零退出）", `status=${String(wwOutside.status)}`);
 
-    console.log("=== winacl · 受限令牌下的 HTTPS（Schannel 机制级边界）===");
+    console.log("=== winacl · 受限令牌下的 HTTPS（Schannel 边界 / 出口 / 组件 DACL）===");
     if (!existsSync(SYSTEM_CURL)) {
       console.log(`  · 未找到 ${SYSTEM_CURL} → 跳过 TLS 断言`);
     } else {
@@ -202,9 +202,46 @@ function probeWindows(): void {
               `${mode}：Schannel 不可用（机制级边界：WRITE_RESTRICTED 自身所致，非缺写授权）`,
               tls.output.trim().split(/\r?\n/u)[0]);
           }
+
+          // 出口：git 可切到自带 TLS 后端（Git for Windows 同时带 Schannel 与 OpenSSL）。
+          // 注意只有 **config** 生效：`GIT_SSL_BACKEND` 环境变量无效（实测）。
+          const gitTls = runRunner([
+            "--workspace", workspace, "--temp", tempRoot, "--mode", "workspace-write", "--",
+            "git", "-c", "http.sslBackend=openssl", "ls-remote", `https://127.0.0.1:${String(sink.port)}/x`,
+          ]);
+          assert(!CREDENTIAL_FAILURE.test(gitTls.output),
+            "workspace-write：git 切 OpenSSL 后端后可完成 TLS（受限档内的 https 出口）",
+            gitTls.output.trim().split(/\r?\n/u)[0]);
         } finally {
           sink.stop();
         }
+      }
+
+      // 组件自建 DACL（第二个类别）：CPython 对 `mkdir(0o700)` 会补一次 chmod，把新目录的 DACL
+      // 换成“只有自己” → 能力 SID 写不进去，于是 pip / pytest 等一切基于 `tempfile` 的 Python
+      // 工具在受限档不可用，且**没有“指到工作区”这种绕法**（换掉的就是 DACL 本身）。
+      // 对照组 `os.makedirs()`（不 chmod）必须可写，用来证明缺口是 DACL 而不是临时区不可写。
+      const pythonAvailable = spawnSync("where", ["python"], { encoding: "utf8", timeout: 20_000 }).status === 0;
+      if (!pythonAvailable) {
+        console.log("  · 未找到 python → 跳过组件 DACL 断言");
+      } else {
+        const pyTemp = runRunner([
+          "--workspace", workspace, "--temp", tempRoot, "--mode", "workspace-write", "--",
+          "python", "-c", "import os,tempfile;p=tempfile.mkdtemp();open(os.path.join(p,'x.txt'),'w').write('y')",
+        ]);
+        assert(/PermissionError|access is denied|denied/iu.test(pyTemp.output),
+          "workspace-write：Python `tempfile` 目录内不可写（已知缺口：组件自建 DACL 不含能力 SID）",
+          pyTemp.output.trim().split(/\r?\n/u).at(-1));
+
+        const pyPlain = runRunner([
+          "--workspace", workspace, "--temp", tempRoot, "--mode", "workspace-write", "--",
+          "python", "-c",
+          "import os;p=os.path.join(os.environ['TEMP'],'plain-sub');os.makedirs(p,exist_ok=True);"
+            + "open(os.path.join(p,'x.txt'),'w').write('y')",
+        ]);
+        assert(pyPlain.status === 0,
+          "workspace-write：同位置 `os.makedirs` 建目录可写（缺口是 DACL，不是临时区不可写）",
+          `${String(pyPlain.status)}: ${pyPlain.output.trim().split(/\r?\n/u).at(-1) ?? ""}`);
       }
 
       // 正向对照：自带 TLS 实现的栈（node/OpenSSL）在受限子进程内不受影响 —— 网络面确实未被约束。

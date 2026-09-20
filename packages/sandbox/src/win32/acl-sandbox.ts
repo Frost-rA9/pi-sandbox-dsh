@@ -34,7 +34,14 @@
  *    Verified 2026-09-20 on Win11 26200 and pinned by the probe's HTTPS
  *    section — see the pi extension's `docs/architecture.md` for the full
  *    evidence chain (flag bisection, user-SID control, CNG key-store grant
- *    that turned out to be unnecessary);
+ *    that turned out to be unnecessary). `git` can still do https inside the
+ *    confined modes by switching to its bundled TLS backend
+ *    (`-c http.sslBackend=openssl`);
+ *  - a second, different failure class: components that install their OWN
+ *    DACL on objects they create exclude the capability SIDs — CPython's
+ *    `mkdir(0o700)` chmod turns a fresh temp directory into "owner only", so
+ *    Python `tempfile`-based tooling (pip, pytest) cannot write inside the
+ *    confined modes at all, and no relocation helps;
  *  - console isolation is unavailable — children share the host console
  *    (CREATE_NO_WINDOW / CREATE_NEW_CONSOLE children die with
  *    STATUS_DLL_INIT_FAILED under the restriction);

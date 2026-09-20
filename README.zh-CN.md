@@ -55,7 +55,12 @@ Linux 的受限壳本身就是 `bash`，同名覆盖完整、无此问题。
 原生 TLS 栈的 HTTPS 客户端（`curl`、`git https`、`Invoke-WebRequest`）都会在握手之前失败，报
 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`。根因是 `WRITE_RESTRICTED` 标志
 **本身**（把用户自己的 SID 加进 restricting 列表也救不回来），所以**补 ACL 白名单修不了**。自带 TLS 实现的栈不受影响：
-`node` / `python` / `gh` / `ssh` / `git`+SSH / 纯 HTTP 都能用 —— 这是换机制之前的实际出口。
+`node` / `python` / `gh` / `ssh` / `git`+SSH / 纯 HTTP 都能用 —— 这是换机制之前的实际出口。`git` 还可以只换后端继续用 https：
+`git -c http.sslBackend=openssl …`（两档实测都通；只有 config 生效，`GIT_SSL_BACKEND` 环境变量无效）。
+
+另有一个**没有绕法**的缺口：**基于 Python `tempfile` 的工具（pip / pytest…）在受限档一律不可用** —— CPython 会给新建的
+`mkdtemp()` 目录补一次 chmod，那个 DACL 盖掉了继承的能力 ACE，于是目录内一切写入都被第二轮检查拒掉（同位置的
+`os.makedirs()` 可写，Node 的 `fs.mkdtempSync()` 也可写）。这类工作请放 `danger-full-access`（或放到沙箱外做）。
 
 配 `defaultTools: ["read", "powershell", "edit", "write"]`（pi 的 Windows 配方）**并不必要**：扩展自己在 `session_start`
 就把 `bash` 摘掉了，而它跑在第一个模型请求之前。只有当你还想在不挂本扩展的会话里也不要有内置 `bash` 时才需要配。

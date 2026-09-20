@@ -58,7 +58,15 @@ is unavailable inside it.** Every HTTPS client that uses the Windows TLS stack (
 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`. The `WRITE_RESTRICTED` flag itself
 causes it — putting the caller's own SID into the restricting list does not help — so **no ACL grant can fix it**.
 Stacks that carry their own TLS implementation are unaffected: `node`, `python`, `gh`, `ssh`, `git` over SSH and plain
-HTTP all keep working, which is the practical workaround until a different confinement mechanism is chosen.
+HTTP all keep working, which is the practical workaround until a different confinement mechanism is chosen. `git` can
+also keep using https inside the confined modes by switching to its bundled TLS backend:
+`git -c http.sslBackend=openssl …` (measured in both confined modes; only the config works, the `GIT_SSL_BACKEND`
+environment variable does not).
+
+One gap has no workaround at all: **Python tooling built on `tempfile` (pip, pytest, …) cannot run in a confined
+mode.** CPython chmods a freshly created `mkdtemp()` directory, and that DACL replaces the inherited capability ACE, so
+the write-restricted second check denies everything inside it (`os.makedirs()` at the same location works fine, and so
+does Node's `fs.mkdtempSync()`). Keep that work in `danger-full-access` (or outside the sandbox).
 
 Setting `defaultTools: ["read", "powershell", "edit", "write"]` (pi's Windows recipe) is **not needed**: the extension
 removes `bash` itself at `session_start`, which runs before the first model request. Set it only if you also want the
