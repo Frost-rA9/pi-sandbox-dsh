@@ -2,7 +2,7 @@
 
 > 用 **OS 边界**约束模型的**写**面：连续 agent + 全局档位 + 逐级批准。读全开、网络不掺和、无命令白名单。
 > 单一参考源 = dsh `packages/sandbox/{sandbox,sandbox-local,sandbox-policy}` + `sandbox-windows-acl`
-> （Windows 层另内联 dsh `packages/subprocess/win32-process`）；锚点 `0d1f50007f`。
+> （Windows 层另内联 dsh `packages/subprocess/win32-process`）；锚点 `ddefc45fbc`。
 > 行为约束见 `AGENTS.md`（本地文件、不入库）；不变量、已知取舍与验证入口见本文。
 
 ## pi 机制映射
@@ -27,6 +27,7 @@
 ## 关键语义
 
 - **三档严格更宽**：`read-only` → `workspace-write` → `danger-full-access`；切档需用户确认；文件工具被拒可"允许本次"（per-call）。
+  阶梯规则（对齐 dsh `escalation.ts`，锚点 `ddefc45fbc`）：**重复当前生效档 = 免批准**（不属于升级）；更宽 = 需批准且仅作用于该次调用；更窄或非法目标 = 执行前失败。
 - **壳缝恒在位**：受限壳**恒注册**；后端不可用 → **调用点**抛 `SANDBOX_UNAVAILABLE`（绝不裸跑）；`danger-full-access` 才委托 pi 本地 shell。`probe()` 只出可见性（通知/徽标），不决定"有没有壳"。
 - **未接管的同类壳：平台态收敛 + 门控兜底**：pi 默认活跃壳名是 `bash`；Windows 受限壳只能叫 `powershell`（受限令牌 × git-bash 不兼容）→ 按 dsh「one shell stack per host」把 `bash` 从**模型工具表**里摘掉（平台态、与档位无关；`danger-full-access` 也不还回来 —— danger 只是"不约束"，不是"多一个壳"）。`tool_call` 门控保留为**兜底**：别的扩展（「记基线→还原」惯用法）/ `--tools` / `defaultTools` 把名字塞回来时，confined 档仍在调用点拦下。Linux 受限壳即 `bash`，同名覆盖完整，无需 roster 处理。
 - **结果侧分类**：runner 失败（exit 门 + 致命签名）**优先于** denial → `SANDBOX_UNAVAILABLE`；denial = 非零退出 + 本后端方言（不取跨后端并集）；`danger` 无事实不判定；分类窗口取输出尾部 64 KiB。
@@ -36,7 +37,7 @@
 
 1. **管写面不管读面**；凭据靠"写面 + 网络出口"，不靠藏读。
 2. **档位 = 全局持续状态**，不与阶段绑定、无子档。
-3. **批准 = 逐级升级（严格更宽）**，不是每命令弹窗、不是命令白名单。
+3. **批准 = 逐级升级（严格更宽）**，不是每命令弹窗、不是命令白名单；重复当前档位不构成批准（dsh `ddefc45fbc` 语义）。
 4. **缝恒在位、不可用即拒**（`SANDBOX_UNAVAILABLE`，绝不裸跑）；未接管的同类壳**既不激活也不可调用**（win32 全程 pwsh，dsh「one shell stack per host」）。
 5. 批准不进模型上下文；文件升级 per-call，壳升级走全局 `/sandbox`。
 6. 状态 = 日志折叠，禁内存真源。
