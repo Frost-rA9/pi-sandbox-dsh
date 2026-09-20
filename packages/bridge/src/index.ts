@@ -103,15 +103,23 @@ export function resolveSandboxPolicy(req: SandboxPolicyRequest): SandboxExecutio
   }
 }
 
-/** 渲染当前档位给模型看（系统提示段）。对齐 dsh `renderPolicyContext`。 */
+/**
+ * 渲染当前档位给模型看（系统提示段）。对齐 dsh `renderPolicyContext`。
+ *
+ * confined 档附一条**能力事实**：网络出口不受约束，但受限壳内 Schannel TLS 不可用（`curl` / `git https`，
+ * 出口 = `git -c http.sslBackend=openssl` / `gh` / `node` / `python`），且 Python `tempfile` 类工具不可用。
+ * 这两条是本后端实测的机制级边界（`docs/architecture.md` 已知取舍、`npm run probe` 的「HTTPS」节）；
+ * 不写进提示段的话，模型会先把失败误判成“网络被沙箱挡了”，再花回合去查文件策略。
+ * 预算：每档 ≤ ~100 tok（`bridge.spec.ts` 按词数钉住），且档位不变时字节不变（保前缀缓存）。
+ */
 export function renderPolicyContext(policy: SandboxExecutionPolicy): string {
   switch (policy.mode) {
     case 'read-only':
-      return 'Current DSH file policy: read-only. Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
+      return 'Current DSH file policy: read-only. Confined operations cannot modify files. Network egress is unrestricted here, but Schannel TLS is not: curl and git https fail (use gh, node, python, or git -c http.sslBackend=openssl), and Python tempfile tools fail. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
     case 'workspace-write':
-      return `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Some platform temporary areas may also be writable.`
+      return `Current DSH file policy: workspace-write. Confined operations may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}, plus a private temp area. Network egress is unrestricted here, but Schannel TLS is not: curl and git https fail (use gh, node, python, or git -c http.sslBackend=openssl), and Python tempfile tools fail.`
     case 'danger-full-access':
-      return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.'
+      return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations, and the confined-shell limits (Schannel TLS, Python tempfile) do not apply.'
     default: {
       const mode: never = policy.mode
       throw new Error(`unreachable sandbox mode: ${String(mode)}`)

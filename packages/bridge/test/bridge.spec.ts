@@ -83,6 +83,17 @@ console.log("=== 6) renderPolicyContext ===");
 assert(renderPolicyContext({ mode: "read-only", workspaceRoot: "/" }).includes("read-only"), "read-only context");
 assert(renderPolicyContext({ mode: "workspace-write", workspaceRoot: "/w" }).includes("/w"), "workspace-write context names root");
 assert(renderPolicyContext({ mode: "danger-full-access", workspaceRoot: "/" }).includes("does not restrict file modifications"), "danger context");
+// 能力事实必须随提示段下发（否则模型会把 Schannel 失败误判成“网络被沙箱挡了”），
+// 并用词数粗守 ≤ ~100 tok 的预算（英文 1 词 ≈ 1.3 tok）。
+for (const mode of ["read-only", "workspace-write"] as const) {
+  const text = renderPolicyContext({ mode, workspaceRoot: "/w" });
+  assert(text.includes("Network egress is unrestricted"), `${mode}: prompt declares unrestricted network egress`);
+  assert(text.includes("http.sslBackend=openssl"), `${mode}: prompt names the git TLS-backend exit`);
+  assert(text.includes("tempfile"), `${mode}: prompt declares the Python tempfile gap`);
+  const words = text.split(/\s+/u).length;
+  assert(words <= 80, `${mode}: prompt segment stays within 80 words (≈100 tok), got ${String(words)}`);
+}
+assert(renderPolicyContext({ mode: "danger-full-access", workspaceRoot: "/" }).includes("do not apply"), "danger context lifts the confined-shell limits");
 
 console.log("=== 7) 结果侧分类（denial 方言 / runner 失败 / fail-closed 文案） ===");
 const bwrapDenial = DENIAL_SIGNATURES.bwrap;
