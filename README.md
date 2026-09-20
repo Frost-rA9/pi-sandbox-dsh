@@ -52,6 +52,14 @@ tool list** on Windows — dsh's "one shell stack per host" — with the `tool_c
 `danger-full-access` does **not** bring `bash` back: it removes confinement, it does not add a shell. Your own `!`
 commands still use git-bash. On Linux the confined shell *is* `bash`, so the same-name override is complete.
 
+One more restricted-token side effect is worth knowing before handing network work to the confined shell: **Schannel TLS
+is unavailable inside it.** Every HTTPS client that uses the Windows TLS stack (`curl`, `git https`,
+`Invoke-WebRequest`) fails before its handshake with
+`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`. The `WRITE_RESTRICTED` flag itself
+causes it — putting the caller's own SID into the restricting list does not help — so **no ACL grant can fix it**.
+Stacks that carry their own TLS implementation are unaffected: `node`, `python`, `gh`, `ssh`, `git` over SSH and plain
+HTTP all keep working, which is the practical workaround until a different confinement mechanism is chosen.
+
 Setting `defaultTools: ["read", "powershell", "edit", "write"]` (pi's Windows recipe) is **not needed**: the extension
 removes `bash` itself at `session_start`, which runs before the first model request. Set it only if you also want the
 built-in `bash` gone in sessions where this extension is not mounted.

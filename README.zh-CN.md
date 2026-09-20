@@ -51,6 +51,12 @@ Windows 上模型的壳**全程都是 `pwsh`**：受限档位下是受限令牌�
 `danger-full-access` 不把 `bash` 拿回来——它只去掉约束，不增一个壳。你自己敲的 `!` 命令仍走 git-bash。
 Linux 的受限壳本身就是 `bash`，同名覆盖完整、无此问题。
 
+还有一条同族的受限令牌副作用，值得在把联网活交给受限壳之前知道：**壳内 Schannel TLS 不可用**。凡是走 Windows
+原生 TLS 栈的 HTTPS 客户端（`curl`、`git https`、`Invoke-WebRequest`）都会在握手之前失败，报
+`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`。根因是 `WRITE_RESTRICTED` 标志
+**本身**（把用户自己的 SID 加进 restricting 列表也救不回来），所以**补 ACL 白名单修不了**。自带 TLS 实现的栈不受影响：
+`node` / `python` / `gh` / `ssh` / `git`+SSH / 纯 HTTP 都能用 —— 这是换机制之前的实际出口。
+
 配 `defaultTools: ["read", "powershell", "edit", "write"]`（pi 的 Windows 配方）**并不必要**：扩展自己在 `session_start`
 就把 `bash` 摘掉了，而它跑在第一个模型请求之前。只有当你还想在不挂本扩展的会话里也不要有内置 `bash` 时才需要配。
 

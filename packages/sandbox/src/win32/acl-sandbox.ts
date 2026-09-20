@@ -23,6 +23,18 @@
  * Known boundaries (inherent to restricted tokens, not this port):
  *  - writes are restricted; reads, network, and process visibility are NOT
  *    (WRITE_RESTRICTED intersects only write accesses);
+ *  - but the blast radius of the write restriction is wider than the write
+ *    surface: under WRITE_RESTRICTED, Schannel's `AcquireCredentialsHandle`
+ *    fails with `SEC_E_NO_CREDENTIALS` — the flag itself does it, not the
+ *    restricting list (adding the caller's OWN SID to the list does not help,
+ *    so no per-path ACL grant can fix it). Every Schannel/WinHTTP-based HTTPS
+ *    client in the child therefore fails before its handshake, while stacks
+ *    carrying their own TLS implementation (OpenSSL, Go, rustls, OpenSSH) are
+ *    unaffected; HKCU registry writes are denied for the same reason.
+ *    Verified 2026-09-20 on Win11 26200 and pinned by the probe's HTTPS
+ *    section — see the pi extension's `docs/architecture.md` for the full
+ *    evidence chain (flag bisection, user-SID control, CNG key-store grant
+ *    that turned out to be unnecessary);
  *  - console isolation is unavailable — children share the host console
  *    (CREATE_NO_WINDOW / CREATE_NEW_CONSOLE children die with
  *    STATUS_DLL_INIT_FAILED under the restriction);
