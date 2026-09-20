@@ -51,6 +51,7 @@
 - 不做命令白名单；不做 plan/build 双模式；不隐藏读；`danger-full-access` 也要用户确认。
 - winacl `enforcement=partial`（Everyone / NTFS 硬链接 / 同身份读）；pwsh 语言模式**按档位不同（实测，同一条 runner 契约）**：`read-only` → `ConstrainedLanguage`（AppLocker 探测要写临时文件而被拒）；`workspace-write` → `FullLanguage`（私有 temp 让探测完成；同一次运行里区外写仍被拒，证明令牌确实受限）。
 - **受限令牌下 git-bash（MSYS2）起不来**（read-only 与 workspace-write 两档实测同错）：`usr\bin\{bash,sh,ls,uname,cygpath}.exe` 全部在 DLL 初始化阶段死于 `couldn't create signal pipe, Win32 error 5`（exit `0xC0000142`），而同版本**原生** `git.exe`/`node`/`cmd`/`pwsh` 正常。机制 = 受限令牌写访问的**第二轮（限制 SID）检查** + **命名管道 open 被拒**（对齐 dsh 已知限制：匿名管道 OK、命名管道 open 被拒 → piped stdio 子进程 EPERM；实测 `spawnSync` piped = EPERM / inherit = OK）。故 win32 上模型面**只有 pwsh**（`bash` 由 `setActiveTools` 摘除，门控兜底）；想换回 bash 栈 = 不挂本扩展 / 自行 `defaultTools`（门控仍会在 confined 档拦下 —— 兜底不依赖 roster）；`!`（user_bash）仍是用户自己的 git-bash。
+- **受限子进程的初始控制台窗口是「隐藏」而非「隔离」**（对齐 dsh `subprocess/win32-process`）：`STARTUPINFOW` 带 `STARTF_USESHOWWINDOW | SW_HIDE`，**新建** console 时不显示窗口；**不用** `CREATE_NO_WINDOW`——它在受限令牌下会让 DLL 初始化失败（`STATUS_DLL_INIT_FAILED`），这是原先「console isolation is unavailable」那条边界声明被参考源推翻的原因。宿主已有 console 时子进程只**继承**（不新建窗口，宿主窗口不受影响），信号/输出仍不隔离；`probe` 报告实测状态（本机宿主均属继承路径，「新建窗口被隐藏」需在**无 console 的宿主**（GUI 启动 pi）上人工观察）。
 - winacl 每命令一个 runner 子进程（净开销 ~80–100 ms）；宿主 kill 会留私有 temp 目录，由下次调用清扫。
 - 测试与 probe 需在**未受限**宿主里跑：宿主自己被受限时 `where`（pi 解析 pwsh 用 `spawnSync` + 管道）与 runner 的管道 stdio 都会 EPERM（实测）。
 - pi 的 `before_agent_start` 每用户轮只跑一次 → 同轮内切档后提示段滞后一轮（由 notice 补偿）。
@@ -62,7 +63,7 @@
 - `npm run typecheck`（strict）
 - `npm test`：bridge 纯函数 / bwrap / winacl 契约 / 结果侧分类 / 清扫策略 / Node 解析 / **平台态壳栈收敛** / core 装配与两条门控 / 不可用可见化
   （winacl 端到端与 `probe` 需在**未受限**宿主里跑，见上方已知取舍）
-- `npm run probe`（真机）：bwrap，或 winacl 往返（read-only 写被拒、workspace-write 区内可写区外被拒、ACE 幂等、temp 无残留、清扫）
+- `npm run probe`（真机）：bwrap，或 winacl 往返（read-only 写被拒、workspace-write 区内可写区外被拒、ACE 幂等、temp 无残留、清扫、受限子进程控制台状态【报告】）
 - 真机会话核查（pi SDK，不调模型）：`createAgentSession({ resourceLoader, sessionManager })` 后**必须** `await session.bindExtensions({})`
   —— `session_start` 是在 `bindExtensions` 里发出的（SDK 路径不会自动发），否则扩展根本没跑；随后 `session.getActiveToolNames()`
   应得 `read, edit, write, powershell`（win32，四档一致；`danger-full-access` 也不把 `bash` 还回来）。

@@ -32,6 +32,8 @@ function assert(cond: boolean, name: string, detail?: string): void {
 }
 
 const RUNNER = resolve(dirname(fileURLToPath(import.meta.url)), "win32", "runner.ts");
+/** 控制台可见性载荷（受限令牌下跑，用 Node：read-only 档 pwsh 是 ConstrainedLanguage，Add-Type 会被拒）。 */
+const CONSOLE_FIXTURE = resolve(dirname(fileURLToPath(import.meta.url)), "..", "test", "fixtures", "console-state.ts");
 const NODE_FLAGS = ["--experimental-strip-types"] as const;
 
 /** 跑一次 runner（与宿主同一条 argv 契约），返回退出码与合并输出。 */
@@ -100,6 +102,19 @@ function probeWindows(): void {
     liveTemp.remove();
     rmSync(freshDir, { recursive: true, force: true });
     assert(existsSync(liveTemp.dir) === false, "收尾：活体样本已自行清理");
+
+    console.log("=== winacl · 受限子进程的控制台状态（已知边界，仅报告）===");
+    // `STARTF_USESHOWWINDOW | SW_HIDE` 只决定**新建** console 的初始可见性；
+    // 宿主已有 console 时子进程只会继承（不新建窗口），本机的 WSL interop / 终端宿主都属于后者，
+    // 故此处只报告实测事实：要观察到「新建窗口被隐藏」需要父进程**完全没有** console（GUI 启动 pi 的路径）。
+    for (const mode of ["read-only", "workspace-write"] as const) {
+      const consoleRun = runRunner([
+        "--workspace", workspace, "--temp", tempRoot, "--mode", mode, "--",
+        process.execPath, ...NODE_FLAGS, CONSOLE_FIXTURE,
+      ]);
+      const line = consoleRun.output.split("\n").map((raw) => raw.trim()).find((raw) => raw.startsWith("{")) ?? "";
+      console.log(`  · ${mode}: status=${String(consoleRun.status)} ${line === "" ? consoleRun.output.trim().slice(0, 160) : line}`);
+    }
 
     console.log("=== winacl · read-only 往返 ===");
     const roWrite = runRunner([
