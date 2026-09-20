@@ -30,8 +30,10 @@ assert(classifyFileWrite({ toolName: "edit", target: "/w/a.txt" }, wwPolicy).dec
 assert(classifyFileWrite({ toolName: "write", target: "/outside.txt" }, wwPolicy).decision === "deny", "workspace-write denies outside");
 assert(classifyFileWrite({ toolName: "write", target: "/outside.txt" }, danger).decision === "allow", "danger allows");
 assert(classifyFileWrite({ toolName: "write", target: undefined }, wwPolicy).decision === "deny", "no target denies");
-assert(denyReason({ reason: "x" }, true).includes("escalation available"), "denyReason adds hint when advertise");
-assert(!denyReason({ reason: "x" }, false).includes("escalation available"), "denyReason omits hint when not advertise");
+assert(denyReason({ reason: "x" }, true).includes("/sandbox"), "denyReason adds the mode-switch hint when advertise");
+assert(!denyReason({ reason: "x" }, false).includes("/sandbox"), "denyReason omits the hint when not advertise");
+// 回归：pi 的 write/edit 没有 per-call 升级参数，hint 绝不能指引模型去传它。
+assert(!denyReason({ reason: "x" }, true).includes("sandbox_permissions"), "denyReason never advertises a parameter pi's write/edit lack");
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

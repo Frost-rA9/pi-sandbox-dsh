@@ -15,7 +15,8 @@ A pi extension that confines the model's **write** actions with an OS boundary �
   danger-full-access — no confinement
   ```
 
-- When a write is denied, the model sees a `[sandbox: file access denied under <mode> mode]` marker and a hint that escalation is available. It retries with `sandbox_permissions` (the narrowest strictly-wider tier) + `justification`; a human approves; **only that call** runs under the wider tier.
+- When a write is denied, the model sees a `[sandbox: file access denied under <mode> mode]` marker. File tools (write/edit) ask the user **in place** (allow once); a refusal or a missing interactive channel returns the denial reason plus a mode-switch hint (`/sandbox <wider tier>`) — pi's write/edit carry no per-call escalation parameter.
+- Ladder rule (aligned with dsh `escalation.ts`, anchor `ddefc45fbc`): **repeating the call's effective tier needs no approval**; a wider tier requires approval and applies to that call only; a narrower or unsupported target fails before execution.
 
 ## Orthogonality
 
@@ -32,7 +33,7 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 
 1. The sandbox bounds **writes**, never **reads** — reading is unrestricted.
 2. Tiers are global/continuous; there is **no `verify` sub-tier** and no plan/build switch.
-3. Approval is **progressive escalation** (strictly wider ladder), not per-command popups or a command allowlist.
+3. Approval is **progressive escalation** (strictly wider ladder), not per-command popups or a command allowlist; repeating the effective tier is not an approval.
 4. **Fail closed**: a confined tier with no usable backend refuses to run (`SANDBOX_UNAVAILABLE`), never silently runs unconfined.
 5. Approval never enters the model context; escalation is per-call only.
 

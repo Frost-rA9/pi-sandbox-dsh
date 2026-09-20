@@ -31,6 +31,7 @@ export const SANDBOX_MODES: readonly SandboxMode[] = ['read-only', 'workspace-wr
 /**
  * 严格更宽阶梯：某档位可升级到的更宽档集合。执行时判定，绝不 baked 进 schema。
  * 对齐 dsh `escalation.ts` WIDER_MODES。
+ * 同级不在集合内——dsh `ddefc45fbc` 起，同级由调用方按「免批准」处理，不再是错误（见 `assertStrictlyWider`）。
  */
 export const WIDER_MODES: Record<SandboxMode, readonly SandboxMode[]> = {
   'read-only': ['workspace-write', 'danger-full-access'],
@@ -44,7 +45,7 @@ export const WIDER_MODES: Record<SandboxMode, readonly SandboxMode[]> = {
  */
 export const ESCALATION_TARGETS: readonly SandboxMode[] = ['workspace-write', 'danger-full-access']
 
-/** 目标档是否严格更宽于当前档（不升反降 / 同级 / 非法 → false）。 */
+/** 目标档是否严格更宽于当前档（不升反降 / 同级 / 非法 → false）。同级为 false 属谓词语义，不等于同级是错误——参考源已改为同级免批准。 */
 export function isStrictlyWider(effectiveMode: SandboxMode, targetMode: SandboxMode): boolean {
   return (WIDER_MODES[effectiveMode] ?? []).includes(targetMode)
 }
@@ -131,6 +132,11 @@ export function sandboxDenialMarker(mode: SandboxMode): string {
 /**
  * 同一回合升级提示，跟在 denial 后（当组合广告了升级字段时）。
  * 对齐 dsh `escalationHintMarker`。
+ *
+ * **pi 侧当前无消费者，接线前不要使用**：pi 的 bash 无 `sandbox_permissions`/`justification`（pi 裁剪），
+ * write/edit 门控的批准是当场布尔「允许本次」——把它挂到任一 pi 路径都会指引模型传一个不存在的参数。
+ * 文件工具用 {@link sandboxFileDeniedHint}，壳用 {@link sandboxWideningHint}。
+ * 保留本函数作为参考源词表单源（dsh 的 per-call 升级提示）。
  */
 export function escalationHintMarker(subject: string): string {
   return `[sandbox: escalation available — retry this exact ${subject} once with sandbox_permissions (the narrowest wider mode that suffices) + justification; the approval prompt asks the user]`
@@ -168,8 +174,13 @@ export interface EscalationRequest {
 }
 
 /**
- * 升级评审前执行校验：目标档必须严格更宽于当前档。非更宽 → 拒绝（不弹窗）。
+ * 升级评审前执行校验：目标档必须严格更宽于当前档。非更宽 → 抛错（不弹窗）。
  * 纯函数（不碰审批通道），供 orchestrator 复用。
+ *
+ * **与参考源的分叉（接线前必须处理）**：dsh `ddefc45fbc`（`61c548e200`）起，`approveEscalation` 对
+ * **重复当前生效档**改为「直接返回该档、免批准」，只对更窄/不支持目标失败；本函数仍是旧策略（同级一并抛错）。
+ * 当前无运行时调用点（仅 `test/bridge.spec.ts`），故不改行为。若将来接线 per-call 升级：
+ * `requestedMode === effectiveMode` → 免批准放行；仅「更窄或非法」才走本函数的失败路径。
  */
 export function assertStrictlyWider(request: EscalationRequest): SandboxMode {
   const { requestedMode: mode, effectiveMode } = request
@@ -279,10 +290,21 @@ export function sandboxRunnerFailureMessage(mode: SandboxMode, detail?: string):
 
 /**
  * bash 的切档提示（pi 裁剪）：pi 的 bash schema 无 `sandbox_permissions`/`justification`，
- * bash 升级恒为全局 `/sandbox`（见 DESIGN 不变量 5）——故提示指向用户决策点。
+ * bash 升级恒为全局 `/sandbox`（见 `docs/architecture.md` 不变量 5）——故提示指向用户决策点。
  */
 export function sandboxWideningHint(): string {
   return '[sandbox: if this write is required, ask the user to widen the mode (/sandbox <wider mode>) — this shell tool has no per-call escalation parameters]'
+}
+
+/**
+ * 文件工具（write/edit）被拒且未获「允许本次」时的提示。
+ *
+ * pi 裁剪：write/edit 无 per-call 升级参数；批准由 `tool_call` 门控**当场**征求（布尔「允许本次」），
+ * 不改档位、也不经模型参数。故被拒后模型只能请用户切档（全局 `/sandbox`），不能带参数重试——
+ * 这里绝不能改用 {@link escalationHintMarker}（那会指引模型传不存在的 `sandbox_permissions`）。
+ */
+export function sandboxFileDeniedHint(): string {
+  return '[sandbox: this write was denied and no one-off approval was granted — ask the user to widen the mode (/sandbox <wider mode>); the write/edit tools take no per-call escalation parameters]'
 }
 
 /* ------------------------------ 后端信息 ------------------------------ */

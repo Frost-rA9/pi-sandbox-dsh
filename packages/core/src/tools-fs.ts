@@ -11,7 +11,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SandboxExecutionPolicy } from "pi-sandbox-dsh-bridge";
-import { sandboxDenialMarker, escalationHintMarker } from "pi-sandbox-dsh-bridge";
+import { sandboxDenialMarker, sandboxFileDeniedHint } from "pi-sandbox-dsh-bridge";
 import { isPathUnder, writableRoots } from "pi-sandbox-dsh-sandbox";
 import type { SandboxState } from "./state.ts";
 
@@ -59,7 +59,7 @@ export function denyReason(
   const qualified = backendUnavailable
     ? `${base} (policy denial — no OS sandbox backend is available on this host; nothing was kernel-enforced)`
     : base;
-  return advertise ? `${qualified}\n${escalationHintMarker("operation")}` : qualified;
+  return advertise ? `${qualified}\n${sandboxFileDeniedHint()}` : qualified;
 }
 
 /**
