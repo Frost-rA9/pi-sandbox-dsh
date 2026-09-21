@@ -108,3 +108,13 @@ node --experimental-strip-types packages/sandbox/sandbox-windows-acl/src/runner.
 Notes for anyone reproducing this: the failure happens during TLS **initialization**, after a successful TCP connect —
 against a closed local port `curl` exits `7` before it ever attempts TLS, so the observation needs a peer that accepts
 the connection (a local listener, or a proxy whose `CONNECT` succeeds).
+
+## Outcome in this port (2026-09-21)
+
+Because no privilege/ACL tweak fixes the mechanism, the only candidate replacement (Low Integrity + mandatory labels)
+is unverified and has no counterpart in the single reference source, and keeping the restricted-token rung would mean
+shipping a boundary that breaks native TLS (plus Python `tempfile` tooling), **`pi-sandbox-dsh` removed its Windows
+backend entirely**. On Windows the extension now runs at a fixed `danger-full-access` tier (no confinement, no tier
+switching, stated in the startup notice and the `/sandbox` command). The `winacl` implementation is preserved only in
+git history (tag `win32-sandbox-last`); this report stays as the evidence record. The Linux/WSL2 rung (bubblewrap) is
+unchanged.

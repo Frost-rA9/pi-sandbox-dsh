@@ -34,7 +34,7 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 1. The sandbox bounds **writes**, never **reads** — reading is unrestricted.
 2. Tiers are global/continuous; there is **no `verify` sub-tier** and no plan/build switch.
 3. Approval is **progressive escalation** (strictly wider ladder), not per-command popups or a command allowlist; repeating the effective tier is not an approval.
-4. **Fail closed**: a confined tier with no usable backend refuses to run (`SANDBOX_UNAVAILABLE`), never silently runs unconfined.
+4. **Fail closed where a backend exists**: on Linux/WSL2 a confined tier with no usable backend refuses to run (`SANDBOX_UNAVAILABLE`), never silently runs unconfined. Windows has no backend at all → a fixed, visible `danger-full-access` (never a claimed-but-absent sandbox).
 5. Approval never enters the model context; escalation is per-call only.
 
 ## Backends
@@ -42,41 +42,27 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 | Platform | Backend | Shell |
 |---|---|---|
 | Linux / WSL2 | bubblewrap | bash |
-| Windows | restricted-token + NTFS ACE (winacl) | pwsh |
+| Windows | **none** — fixed `danger-full-access` | pi defaults (`bash` + `powershell`) |
 
-On Windows the model's shell is **`pwsh` in every mode** — the confined `pwsh` under the restricted token, and the
-local `pwsh` under `danger-full-access`. The default `bash` tool (git-bash) is not confinement-capable: the restricted
-token cannot start MSYS2 at all (its runtime dies at DLL init with `couldn't create signal pipe, Win32 error 5`;
-measured in both confined modes, while native `git.exe`/`node`/`cmd` run fine), so it is **removed from the model's
-tool list** on Windows — dsh's "one shell stack per host" — with the `tool_call` gate kept as a backstop.
-`danger-full-access` does **not** bring `bash` back: it removes confinement, it does not add a shell. Your own `!`
-commands still use git-bash. On Linux the confined shell *is* `bash`, so the same-name override is complete.
+### Windows has no OS write sandbox
 
-One more restricted-token side effect is worth knowing before handing network work to the confined shell: **Schannel TLS
-is unavailable inside it.** Every HTTPS client that uses the Windows TLS stack (`curl`, `git https`,
-`Invoke-WebRequest`) fails before its handshake with
-`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`. The `WRITE_RESTRICTED` flag itself
-causes it — putting the caller's own SID into the restricting list does not help — so **no ACL grant can fix it**.
-Stacks that carry their own TLS implementation are unaffected: `node`, `python`, `gh`, `ssh`, `git` over SSH and plain
-HTTP all keep working, which is the practical workaround until a different confinement mechanism is chosen. `git` can
-also keep using https inside the confined modes by switching to its bundled TLS backend:
-`git -c http.sslBackend=openssl …` (measured in both confined modes; only the config works, the `GIT_SSL_BACKEND`
-environment variable does not).
+On Windows this extension does **not** confine anything: it runs at a fixed `danger-full-access` tier, and `/sandbox`
+only reports that fact (switching is refused). This is deliberate, not a gap to be patched later:
 
-One gap has no workaround at all: **Python tooling built on `tempfile` (pip, pytest, …) cannot run in a confined
-mode.** CPython chmods a freshly created `mkdtemp()` directory, and that DACL replaces the inherited capability ACE, so
-the write-restricted second check denies everything inside it (`os.makedirs()` at the same location works fine, and so
-does Node's `fs.mkdtempSync()`). Keep that work in `danger-full-access` (or outside the sandbox).
+- The only shipped Windows mechanism — a `WRITE_RESTRICTED` restricted token with NTFS ACE write grants — is
+  **fundamentally incompatible with Schannel/SSPI**: every HTTPS client on the Windows TLS stack (`curl`,
+  `git https`, `Invoke-WebRequest`) fails before its handshake with
+  `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`. Dropping `DISABLE_MAX_PRIVILEGE` or
+  adding SIDs to the restricting list does not help, so **no privilege or ACL tweak fixes it** (measured; the evidence
+  is archived in [docs/dsh-upstream-report.md](docs/dsh-upstream-report.md)). Python tooling built on `tempfile`
+  (`pip`, `pytest`) was a second, separate gap with no workaround.
+- The candidate replacement (Low Integrity + mandatory labels) is **unverified**, has **no counterpart in the single
+  reference source (dsh)**, and adopting it would cost the reference anchor — a poor trade for a write-only boundary.
+- Rather than keep a mechanism that appears to confine writes while breaking native TLS, the extension **removed the
+  Windows backend** and states the boundary honestly: no OS sandbox, no tier switching.
 
-Setting `defaultTools: ["read", "powershell", "edit", "write"]` (pi's Windows recipe) is **not needed**: the extension
-removes `bash` itself at `session_start`, which runs before the first model request. Set it only if you also want the
-built-in `bash` gone in sessions where this extension is not mounted.
-
-Windows prerequisites: a system `node` (the Bun host cannot run the Win32 runner subprocess — resolved from
-`PI_SANDBOX_NODE`, then `PATH`, then the user/system registry `Path`) and the `koffi` optional dependency installed
-by `npm install`. Under `read-only`, PowerShell runs in `ConstrainedLanguage` mode (no .NET method calls — its startup
-AppLocker probe cannot write its temp files); `workspace-write` has a private temp directory, so the probe completes
-and the mode stays `FullLanguage` (measured).
+Because there is no confinement on Windows, no shell override and no write gate are registered: the model gets pi's
+normal shell tools, and your own `!` commands behave as usual. Linux/WSL2 is unchanged (bubblewrap + fail-closed).
 
 See [docs/architecture.md](docs/architecture.md) for the architecture, design invariants, and known trade-offs.
 

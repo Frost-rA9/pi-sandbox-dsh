@@ -34,7 +34,7 @@
 1. 沙箱只约束**写入**，从不约束**读取**——读取不受限。
 2. 档位全局/连续；**无 `verify` 子档位**，也无 plan/build 切换。
 3. 批准是**渐进式升级**（严格更宽的阶梯），不是逐命令弹窗也不是命令白名单；重复当前档位不构成批准。
-4. **失败即关闭**：受限制档位无可用后端时拒绝运行（`SANDBOX_UNAVAILABLE`），绝不静默无限制运行。
+4. **有后端时才失败即关闭**：Linux/WSL2 上受限档无可用后端时拒绝运行（`SANDBOX_UNAVAILABLE`），绝不静默无限制运行。Windows 根本没有后端 → 固定且可见的 `danger-full-access`（绝不宣称一个不存在的沙箱）。
 5. 批准从不进入模型上下文；升级仅针对单次调用。
 
 ## 后端
@@ -42,32 +42,25 @@
 | 平台 | 后端 | Shell |
 |---|---|---|
 | Linux / WSL2 | bubblewrap | bash |
-| Windows | restricted-token + NTFS ACE (winacl) | pwsh |
+| Windows | **无** —— 固定 `danger-full-access` | pi 默认（`bash` + `powershell`） |
 
-Windows 上模型的壳**全程都是 `pwsh`**：受限档位下是受限令牌里的 `pwsh`，`danger-full-access` 下是本机 `pwsh`。
-默认的 `bash` 工具（git-bash）不具收敛能力——受限令牌**跑不起来** MSYS2：其运行时在 DLL 初始化阶段就死在
-`couldn't create signal pipe, Win32 error 5`（read-only 与 workspace-write 两档实测同错，而原生 `git.exe`/`node`/`cmd` 正常）。
-因此按 dsh「one shell stack per host」把 `bash` 从**模型工具表**里摘掉（`setActiveTools`），`tool_call` 门控保留作兜底：
-`danger-full-access` 不把 `bash` 拿回来——它只去掉约束，不增一个壳。你自己敲的 `!` 命令仍走 git-bash。
-Linux 的受限壳本身就是 `bash`，同名覆盖完整、无此问题。
+### Windows 不做 OS 写面沙箱
 
-还有一条同族的受限令牌副作用，值得在把联网活交给受限壳之前知道：**壳内 Schannel TLS 不可用**。凡是走 Windows
-原生 TLS 栈的 HTTPS 客户端（`curl`、`git https`、`Invoke-WebRequest`）都会在握手之前失败，报
-`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`。根因是 `WRITE_RESTRICTED` 标志
-**本身**（把用户自己的 SID 加进 restricting 列表也救不回来），所以**补 ACL 白名单修不了**。自带 TLS 实现的栈不受影响：
-`node` / `python` / `gh` / `ssh` / `git`+SSH / 纯 HTTP 都能用 —— 这是换机制之前的实际出口。`git` 还可以只换后端继续用 https：
-`git -c http.sslBackend=openssl …`（两档实测都通；只有 config 生效，`GIT_SSL_BACKEND` 环境变量无效）。
+Windows 上本扩展**不做任何约束**：固定运行在 `danger-full-access`，`/sandbox` 只报告这个事实（拒绝切换）。
+这是有意为之，不是待补的缺口：
 
-另有一个**没有绕法**的缺口：**基于 Python `tempfile` 的工具（pip / pytest…）在受限档一律不可用** —— CPython 会给新建的
-`mkdtemp()` 目录补一次 chmod，那个 DACL 盖掉了继承的能力 ACE，于是目录内一切写入都被第二轮检查拒掉（同位置的
-`os.makedirs()` 可写，Node 的 `fs.mkdtempSync()` 也可写）。这类工作请放 `danger-full-access`（或放到沙箱外做）。
+- 唯一已实现的 Windows 机制——`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单——与 **Schannel/SSPI 平台级不兼容**：
+  凡是走 Windows 原生 TLS 栈的 HTTPS 客户端（`curl`、`git https`、`Invoke-WebRequest`）都在握手之前失败，报
+  `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`。去掉 `DISABLE_MAX_PRIVILEGE`
+  或往 restricting 列表里加 SID 都无效 → **任何特权/ACL 微调都修不了**（实测；证据留档在
+  [docs/dsh-upstream-report.md](docs/dsh-upstream-report.md)）。基于 Python `tempfile` 的工具（pip/pytest）是另一个
+  独立缺口，且没有绕法。
+- 候选替代机制（Low Integrity + 强制标签）**未经社区验证**，在**单一参考源 dsh 里没有对应实现**，采用它会丢掉参考锚点——
+  对一个只管写面的边界来说，代价太大。
+- 与其留一个「看着在管写、实际破坏原生 TLS」的形态，不如**移除 Windows 后端**、如实声明边界：无 OS 沙箱、不可切档。
 
-配 `defaultTools: ["read", "powershell", "edit", "write"]`（pi 的 Windows 配方）**并不必要**：扩展自己在 `session_start`
-就把 `bash` 摘掉了，而它跑在第一个模型请求之前。只有当你还想在不挂本扩展的会话里也不要有内置 `bash` 时才需要配。
-
-Windows 前置：系统 `node`（Bun 宿主不能跑 Win32 runner 子进程；解析顺序 `PI_SANDBOX_NODE` → `PATH` → 用户/系统注册表
-`Path`）与 `npm install` 装上的 `koffi`（optionalDependency）。`read-only` 档下 PowerShell 运行在 `ConstrainedLanguage`
-（.NET 方法调用被禁；其预置探测需要写临时文件）；`workspace-write` 有私有临时目录，探测能完成 → 保持 `FullLanguage`（实测）。
+因为没有约束，Windows 上不注册任何壳覆盖与写面门控：模型拿到 pi 默认的壳工具，你自己敲的 `!` 命令也照常。
+Linux/WSL2 完全不变（bubblewrap + fail-closed）。
 
 架构、不变量与已知取舍见 [docs/architecture.md](docs/architecture.md)。
 
