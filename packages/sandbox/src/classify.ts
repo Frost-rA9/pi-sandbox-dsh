@@ -71,7 +71,7 @@ export function resolveRunFacts(
 
 /**
  * 把一个基础 `BashOperations` 包成"执行后按后端事实分类"的 operations。
- * @param base - 真正执行命令的 operations（pi 的本地 shell，或 winacl 的 runner 驱动）。
+ * @param base - 真正执行命令的 operations（pi 的本地 shell）。
  * @param resolveFacts - 按调用时的 cwd 解析后端事实；`danger-full-access` 无事实 → 返回 undefined（不判定）。
  * @returns 供 `BashToolOptions.operations` 使用的包装（不 fork pi 工具）。
  */

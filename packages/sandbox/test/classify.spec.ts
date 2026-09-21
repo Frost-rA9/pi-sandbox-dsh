@@ -113,7 +113,6 @@ console.log("=== 后端事实接线 ===");
   assert(typeof options.spawnHook === "function", "bwrap keeps its argv spawnHook");
   assert(typeof options.operations?.exec === "function", "bwrap adds classifying operations");
   assert(backend.runnerFailureRules[0]?.fatalSignatures.includes("bwrap: ") === true, "bwrap declares its runner-failure signature");
-  assert(DENIAL_SIGNATURES.winacl.includes("operation not permitted"), "winacl declaration includes Node EPERM");
 }
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);

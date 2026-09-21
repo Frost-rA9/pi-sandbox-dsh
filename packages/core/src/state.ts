@@ -35,8 +35,6 @@ export interface SandboxState {
   mode: SandboxMode;
   /** 当前 cwd（作为 workspace-write 的根）。 */
   workspaceRoot: string;
-  /** 会话 ID（winacl 临时态键；bwrap 可无）。 */
-  sessionId?: string;
 }
 
 export function initState(defaultMode: SandboxMode, workspaceRoot: string): SandboxState {

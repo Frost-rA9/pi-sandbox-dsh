@@ -25,6 +25,13 @@ export function isConfinedMode(mode: SandboxMode): mode is ConfinedSandboxMode {
 /** 默认档（fail-safe）：dsh 部署默认即 read-only。 */
 export const DEFAULT_SANDBOX_MODE: SandboxMode = 'read-only'
 
+/**
+ * 无 OS 沙箱平台上扩展固定运行的档（Windows）。
+ * 该平台没有可用的写面沙箱（受限令牌 × Schannel/SSPI 不兼容，替代机制未验证；见 `docs/architecture.md` 已知取舍），
+ * 故不宣称受限档、也不允许切换——`/sandbox` 只报告此档。
+ */
+export const UNSANDBOXED_MODE: SandboxMode = 'danger-full-access'
+
 /** 全部档位（窄→宽，/sandbox 交互选择与错误提示共用单源）。 */
 export const SANDBOX_MODES: readonly SandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access']
 
@@ -64,16 +71,14 @@ export function isSandboxMode(v: unknown): v is SandboxMode {
 
 /* ------------------------------ SandboxExecutionPolicy ------------------------------ */
 
-export type SandboxBackendKind = 'bwrap' | 'winacl'
-export type SandboxShellTool = 'bash' | 'powershell'
+export type SandboxBackendKind = 'bwrap'
+export type SandboxShellTool = 'bash'
 
 /** 一次 capability call 的完整写面 policy（含本次调用实际生效的 mode 与根）。 */
 export interface SandboxExecutionPolicy {
   mode: SandboxMode
   /** `workspace-write` 可写的绝对根目录。 */
   workspaceRoot: string
-  /** 会话身份（后端按会话键临时状态，如 winacl 的随机 temp 目录）。 */
-  sessionId?: string
 }
 
 /** policy 解析输入（对齐 dsh `SandboxPolicyRequest`）。 */
@@ -105,21 +110,17 @@ export function resolveSandboxPolicy(req: SandboxPolicyRequest): SandboxExecutio
 
 /**
  * 渲染当前档位给模型看（系统提示段）。对齐 dsh `renderPolicyContext`。
- *
- * confined 档附一条**能力事实**：网络出口不受约束，但受限壳内 Schannel TLS 不可用（`curl` / `git https`，
- * 出口 = `git -c http.sslBackend=openssl` / `gh` / `node` / `python`），且 Python `tempfile` 类工具不可用。
- * 这两条是本后端实测的机制级边界（`docs/architecture.md` 已知取舍、`npm run probe` 的「HTTPS」节）；
- * 不写进提示段的话，模型会先把失败误判成“网络被沙箱挡了”，再花回合去查文件策略。
  * 预算：每档 ≤ ~100 tok（`bridge.spec.ts` 按词数钉住），且档位不变时字节不变（保前缀缓存）。
+ * 平台分叉：confined 档只存在于 **Linux/WSL2**（bwrap）；Windows 由 core 追加"本平台无沙箱、档位固定"一句。
  */
 export function renderPolicyContext(policy: SandboxExecutionPolicy): string {
   switch (policy.mode) {
     case 'read-only':
-      return 'Current DSH file policy: read-only. Confined operations cannot modify files. Network egress is unrestricted here, but Schannel TLS is not: curl and git https fail (use gh, node, python, or git -c http.sslBackend=openssl), and Python tempfile tools fail. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
+      return 'Current DSH file policy: read-only. Confined operations cannot modify files. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
     case 'workspace-write':
-      return `Current DSH file policy: workspace-write. Confined operations may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}, plus a private temp area. Network egress is unrestricted here, but Schannel TLS is not: curl and git https fail (use gh, node, python, or git -c http.sslBackend=openssl), and Python tempfile tools fail.`
+      return `Current DSH file policy: workspace-write. Confined operations may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Some platform temporary areas may also be writable.`
     case 'danger-full-access':
-      return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations, and the confined-shell limits (Schannel TLS, Python tempfile) do not apply.'
+      return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.'
     default: {
       const mode: never = policy.mode
       throw new Error(`unreachable sandbox mode: ${String(mode)}`)
@@ -220,22 +221,12 @@ export interface RunnerFailureRule {
 export const DENIAL_SIGNATURES: Record<SandboxBackendKind, readonly string[]> = {
   // bwrap 只读 bind 上的 EROFS 文本。
   bwrap: ['read-only file system'],
-  // pwsh/.NET: "Access to the path '…' is denied."；cmd: "Access is denied."；
-  // Node EACCES: "permission denied"；EPERM: "operation not permitted"（后两项对齐 dsh）。
-  winacl: ['access is denied', 'access to the path', 'permission denied', 'operation not permitted'],
 }
-
-/** winacl runner 自身失败时的保留退出码（对齐 dsh `WINDOWS_ACL_RUNNER_FAILURE_EXIT`）。 */
-export const WINACL_RUNNER_FAILURE_EXIT = 127
-
-/** winacl runner 自身失败时的 stderr 前缀契约（runner 实现必须遵守）。 */
-export const WINACL_RUNNER_FAILURE_SIGNATURE = 'windows-acl-run: '
 
 /** 各后端的 runner 失败规则（对齐 dsh `RUNNER_FAILURE_RULES`）。 */
 export const RUNNER_FAILURE_RULES: Record<SandboxBackendKind, readonly RunnerFailureRule[]> = {
   // bwrap 自身诊断均以 `bwrap: ` 开头（含 PATH 缺失时的 `sh: 1: bwrap: not found`）。
   bwrap: [{ fatalSignatures: ['bwrap: '] }],
-  winacl: [{ allowedExitCodes: [WINACL_RUNNER_FAILURE_EXIT], fatalSignatures: [WINACL_RUNNER_FAILURE_SIGNATURE] }],
 }
 
 /**

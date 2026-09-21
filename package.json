@@ -22,13 +22,9 @@
     "probe": "node --experimental-strip-types packages/sandbox/src/probe.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
-  },
-  "optionalDependencies": {
-    "koffi": "^3.1.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.86.1",

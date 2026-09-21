@@ -1,8 +1,10 @@
 /**
  * pi-sandbox-dsh-sandbox · 后端抽象 + 选择器。
  *
- * 对齐 dsh `sandbox-local`：按平台选后端（linux→bwrap；win32→winacl）。后端 = 库，
- * 被 core import（pi `BashSpawnHook` 同步约束 → 沙箱不能做成独立扩展）。
+ * 对齐 dsh `sandbox-local`：按平台选后端。**只有 Linux/WSL2 有后端（bwrap）**；
+ * Windows 无可用写面沙箱（受限令牌 × Schannel/SSPI 不兼容，替代机制未验证）→ `selectBackend` 返回 undefined，
+ * 由 core 固定为 `danger-full-access`（见 `docs/architecture.md`）。后端 = 库，被 core import
+ * （pi `BashSpawnHook` 同步约束 → 沙箱不能做成独立扩展）。
  */
 import type { BashToolOptions } from "@earendil-works/pi-coding-agent";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
@@ -10,7 +12,6 @@ import type { RunnerFailureRule, SandboxBackendInfo, SandboxExecutionPolicy } fr
 import { RUNNER_FAILURE_RULES } from "pi-sandbox-dsh-bridge";
 import { createConfinedOperations, resolveRunFacts } from "./classify.ts";
 import { buildBwrapCommand, probeBwrap } from "./bwrap.ts";
-import { createWinaclBackend } from "./winacl.ts";
 
 /**
  * 传给沙箱子进程的非机密环境变量白名单。
@@ -42,8 +43,8 @@ export interface BackendContext {
 
 export interface SandboxBackend {
   readonly info: SandboxBackendInfo;
-  readonly kind: "bwrap" | "winacl";
-  readonly shellTool: "bash" | "powershell";
+  readonly kind: "bwrap";
+  readonly shellTool: "bash";
   /** 本后端的 runner 失败规则（结果侧分类用；danger 档不适用）。 */
   readonly runnerFailureRules: readonly RunnerFailureRule[];
   probe(): boolean;
@@ -82,10 +83,12 @@ class BwrapBackend implements SandboxBackend {
   }
 }
 
-export function selectBackend(platform: string = process.platform): SandboxBackend {
-  if (platform === "win32") {
-    return createWinaclBackend();
-  }
+/**
+ * 按平台选后端。Windows 无可用写面沙箱 → undefined（**无后端 ≠ 后端不可用**：
+ * core 据此固定 `danger-full-access`，而不是 fail-closed 拒绝）。
+ */
+export function selectBackend(platform: string = process.platform): SandboxBackend | undefined {
+  if (platform === "win32") return undefined;
   return new BwrapBackend();
 }
 

@@ -2,15 +2,16 @@
  * pi-sandbox-dsh-core · pi 扩展宿主。
  *
  * 单一参考源 = dsh：连续 agent + 全局沙箱档 + 门控驱动（用户决策点）。
- * 装配：运行时 store（全局档折叠）→ 后端（bwrap/winacl）受限壳工具（**恒注册**；不可用则在调用点 fail-closed）
- * → 文件工具门控（write/edit，被拒即征求批准）→ 未接管的同类壳：**平台态摘表**（win32 摘 git-bash `bash`）
- * + `tool_call` 门控兜底 → `/sandbox` 命令（更宽档需确认）→ 档位提示段。
+ * 平台分叉（2026-09-21 决策，见 `docs/architecture.md`）：
+ * - **Linux/WSL2**：bwrap 后端 + 受限 `bash`（**恒注册**；后端不可用则在调用点 fail-closed）
+ *   + write/edit 门控（被拒即征求「允许本次」）+ `/sandbox` 切档 + 档位提示段。
+ * - **Windows**：**无可用 OS 写面沙箱**（受限令牌 × Schannel/SSPI 平台级不兼容，替代机制未验证）
+ *   → 固定 `danger-full-access`，不注册壳覆盖/门控；`/sandbox` 保留可见性但**拒绝切换**。
+ *   这是 fail-open，但**不假收敛**：不宣称一个不存在的沙箱。
  */
 import {
   createBashTool,
   createLocalBashOperations,
-  createLocalPowerShellOperations,
-  createPowerShellTool,
   type BashOperations,
   type BashToolOptions,
   type ExtensionAPI,
@@ -21,6 +22,7 @@ import type { SandboxExecutionPolicy, SandboxMode } from "pi-sandbox-dsh-bridge"
 import {
   DEFAULT_SANDBOX_MODE,
   SANDBOX_UNAVAILABLE,
+  UNSANDBOXED_MODE,
   renderPolicyContext,
   isSandboxMode,
   SANDBOX_MODE_DESCRIPTIONS,
@@ -29,13 +31,18 @@ import {
 import { selectBackend, type SandboxBackend } from "pi-sandbox-dsh-sandbox";
 import { initState, foldSandboxMode, SANDBOX_MODE_ENTRY, type SandboxState } from "./state.ts";
 import { registerFileToolGate } from "./tools-fs.ts";
-import { dropUnconfinableShell, registerForeignShellGate } from "./tools-shell.ts";
+
+/** 本平台是否有 OS 写面沙箱。Windows 没有（见模块头）。 */
+const UNSANDBOXED_PLATFORM = process.platform === "win32";
+
+/** 徽标状态：正常 / 后端不可用（Linux fail-closed）/ 本平台无沙箱（Windows）。 */
+type BadgeStatus = "ok" | "no-backend" | "unsandboxed";
 
 /**
  * 徽标文案 `[<mode>]`：只读=橙(256色208，pi 主题无橙)、工作区可写=蓝(accent)、全权=红(error)。
- * 后端不可用时追加 ` (no backend)`；否则徽标会宣告一个并未生效的档位（写入面没有被 OS 约束）。
+ * 后端不可用或本平台无沙箱时追加后缀，避免徽标宣告一个并未生效的档位。
  */
-function sandboxBadgeText(theme: Theme, mode: SandboxMode, backendAvailable: boolean): string {
+function sandboxBadgeText(theme: Theme, mode: SandboxMode, status: BadgeStatus): string {
   const base = (() => {
     switch (mode) {
       case 'read-only':
@@ -48,28 +55,26 @@ function sandboxBadgeText(theme: Theme, mode: SandboxMode, backendAvailable: boo
         return '[sandbox]';
     }
   })();
-  return backendAvailable ? base : `${base} (no backend)`;
+  if (status === "no-backend") return `${base} (no backend)`;
+  if (status === "unsandboxed") return `${base} (no sandbox)`;
+  return base;
 }
 
 /**
- * 后端不可用时的通知文案（英文，对齐通知机制约定）：壳仍在，但会拒绝执行。
- * 第二个子句按平台分说：win32 上未接管的 git-bash 已被**平台态摘表**（`setActiveTools`，不是门控）；
- * Linux 上闲置的 `powershell` 只是被 `tool_call` 门控拦下。
+ * Linux 后端不可用时的通知文案（英文，对齐通知机制约定）：受限 `bash` 仍在，但会拒绝执行。
  */
-function backendUnavailableNotice(detail: string, confinedShell: string): string {
-  const otherShell = confinedShell === "powershell"
-    ? "git-bash (`bash`) is not offered on this host (it cannot run under the restricted token)"
-    : "the other shell tool (`powershell`) is gated off in confined modes";
-  return `pi-sandbox-dsh: sandbox backend unavailable — the confined "${confinedShell}" shell will REFUSE commands until this is fixed `
-    + `(it never runs them unconfined), ${otherShell}, `
-    + 'and write/edit stay gated by the current mode. '
+function backendUnavailableNotice(detail: string): string {
+  return `pi-sandbox-dsh: sandbox backend unavailable — the confined "bash" shell will REFUSE commands until this is fixed `
+    + '(it never runs them unconfined), and write/edit stay gated by the current mode. '
     + `Reason: ${detail} `
-    + 'Fix the backend (Windows: a system `node` + `koffi`; Linux/WSL2: bwrap) or switch to danger-full-access explicitly.';
+    + 'Fix the backend (Linux/WSL2: bwrap) or switch to danger-full-access explicitly.';
 }
 
-/** 本平台对应的受限壳工具名（win32 → powershell，其余 → bash）。 */
-function confinedShellName(): "bash" | "powershell" {
-  return process.platform === "win32" ? "powershell" : "bash";
+/** Windows 无沙箱的启动通知（英文，对齐通知机制约定）。 */
+function unsandboxedPlatformNotice(): string {
+  return 'pi-sandbox-dsh: this platform has no OS write sandbox (Windows). '
+    + `Running unconfined with a fixed ${UNSANDBOXED_MODE} mode — the sandbox tier cannot be switched here. `
+    + 'See docs/architecture.md for why (restricted tokens are incompatible with Schannel/SSPI).';
 }
 
 /** fail-closed 错误（带 `SANDBOX_UNAVAILABLE` 错误码，与结果侧分类同一词汇）。 */
@@ -86,15 +91,13 @@ function sandboxUnavailable(detail: string): Error {
  * 后端构造失败时的"拒绝壳"：工具面保持存在（不变量 4），非 `danger-full-access` 一律拒绝，
  * 只有用户显式放开才交回 pi 本地 shell。
  * @param detail - 失败原因（写进错误文案）。
- * @param shellTool - 本平台的壳工具名。
  * @param readState - 按 cwd 解析 policy。
  */
 function refusingShellOperations(
   detail: string,
-  shellTool: "bash" | "powershell",
   readState: (cwd: string) => SandboxExecutionPolicy,
 ): BashOperations {
-  const local = shellTool === "powershell" ? createLocalPowerShellOperations() : createLocalBashOperations();
+  const local = createLocalBashOperations();
   return {
     exec: async (command, cwd, options) => {
       if (readState(cwd).mode === "danger-full-access") return local.exec(command, cwd, options);
@@ -104,77 +107,91 @@ function refusingShellOperations(
 }
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
-  const store: SandboxState = initState(DEFAULT_SANDBOX_MODE, process.cwd());
+  const store: SandboxState = initState(UNSANDBOXED_PLATFORM ? UNSANDBOXED_MODE : DEFAULT_SANDBOX_MODE, process.cwd());
 
   // footer 徽标（方案 A）：setStatus 写入 pi footer 状态槽（不替换、永不丢信息、不随 pi 升级漂移）
-  const updateSandboxBadge = (ui: ExtensionUIContext | undefined): void => {
+  const updateSandboxBadge = (ui: ExtensionUIContext | undefined, backendError: string | undefined): void => {
     if (!ui) return;
-    ui.setStatus('pi-sandbox-dsh', sandboxBadgeText(ui.theme, store.mode, backendError === undefined));
+    const status: BadgeStatus = UNSANDBOXED_PLATFORM
+      ? "unsandboxed"
+      : backendError === undefined ? "ok" : "no-backend";
+    ui.setStatus('pi-sandbox-dsh', sandboxBadgeText(ui.theme, store.mode, status));
   };
-
-  pi.on("session_start", (_event, ctx) => {
-    store.workspaceRoot = ctx.cwd;
-    const entries = (ctx.sessionManager?.getEntries?.() ?? []) as readonly unknown[];
-    store.mode = foldSandboxMode(entries as never, store.defaultMode);
-    // 平台态壳栈收敛（dsh「one shell stack per host」）：win32 上受限壳是 `powershell`，而 pi 默认活跃的
-    // git-bash `bash` 不具收敛能力（MSYS2 在受限令牌下起不来）→ 把它从**模型工具表**里摘掉。
-    // 与档位无关（同 dsh：壳栈按平台定），故不按档位还原；`tool_call` 门控仍作为兜底。
-    dropUnconfinableShell(pi);
-    updateSandboxBadge(ctx.ui);
-    // fail-closed 的“可见化”：后端不可用时壳工具根本没注册（pi 内置 shell 仍在，即未被收敛）——
-    // 必须显式告知用户，不能让徽标宣称一个没生效的档位。
-    if (backendError !== undefined) {
-      ctx.ui?.notify(backendUnavailableNotice(backendError, confinedShellName()), "error");
-    }
-  });
 
   // 读取当前执行 policy（spawnHook 用）
   const readState = (_cwd: string): SandboxExecutionPolicy => ({
     mode: store.mode,
     workspaceRoot: store.workspaceRoot,
-    ...(store.sessionId !== undefined ? { sessionId: store.sessionId } : {}),
   });
 
-  // 后端装配：probe **只出“可见性”**（通知/徽标），不再是“有没有壳”的判据；受限壳恒注册（不变量 4）。
-  let backend: SandboxBackend | undefined;
+  // ---- 平台分叉：Windows 无后端，固定全权；Linux 走 bwrap（恒注册受限壳，不可用即拒）----
   let backendError: string | undefined;
-  let shellToolOptions: BashToolOptions | undefined;
-  try {
-    backend = selectBackend();
-    if (!backend.probe()) {
-      // 后端自己声明失败原因（bwrap 缺依赖 / winacl 缺 Node / runner probe 失败…），不要写死某一后端。
-      backendError = backend.info.detail ?? `${backend.kind} backend probe failed`;
+
+  if (UNSANDBOXED_PLATFORM) {
+    // 无 OS 沙箱：不选后端、不注册壳覆盖、不注册任何门控。档位恒 UNSANDBOXED_MODE。
+    pi.on("session_start", (_event, ctx) => {
+      store.workspaceRoot = ctx.cwd;
+      store.mode = UNSANDBOXED_MODE;
+      updateSandboxBadge(ctx.ui, undefined);
+      ctx.ui?.notify(unsandboxedPlatformNotice(), "warning");
+    });
+  } else {
+    // 后端装配：probe **只出"可见性"**（通知/徽标），不再是"有没有壳"的判据；受限壳恒注册（不变量 4）。
+    let backend: SandboxBackend | undefined;
+    let shellToolOptions: BashToolOptions | undefined;
+    try {
+      backend = selectBackend();
+      if (backend === undefined) {
+        backendError = "no sandbox backend is available on this platform";
+      } else {
+        if (!backend.probe()) {
+          // 后端自己声明失败原因（bwrap 缺依赖…），不要写死某一后端。
+          backendError = backend.info.detail ?? `${backend.kind} backend probe failed`;
+        }
+        shellToolOptions = backend.createToolOptions({ workspaceRoot: store.workspaceRoot, readState });
+      }
+    } catch (e) {
+      backendError = e instanceof Error ? e.message : String(e);
+      backend = undefined;
+      shellToolOptions = undefined;
     }
-    shellToolOptions = backend.createToolOptions({ workspaceRoot: store.workspaceRoot, readState });
-  } catch (e) {
-    backendError = e instanceof Error ? e.message : String(e);
-    backend = undefined;
-    shellToolOptions = undefined;
+
+    // 壳工具恒注册：不可用时其 operations 在调用点拒绝；构造失败则退化为"拒绝壳"。
+    const shellOptions: BashToolOptions = shellToolOptions ?? {
+      operations: refusingShellOperations(backendError ?? "sandbox backend construction failed", readState),
+    };
+    pi.registerTool(createBashTool(store.workspaceRoot, shellOptions) as never);
+
+    // 文件工具（write/edit）门控：被拒即征求用户批准（per-call 升级）
+    registerFileToolGate(pi, store, readState, () => store.mode !== "danger-full-access", () => backendError !== undefined);
+
+    pi.on("session_start", (_event, ctx) => {
+      store.workspaceRoot = ctx.cwd;
+      const entries = (ctx.sessionManager?.getEntries?.() ?? []) as readonly unknown[];
+      store.mode = foldSandboxMode(entries as never, store.defaultMode);
+      updateSandboxBadge(ctx.ui, backendError);
+      // fail-closed 的"可见化"：后端不可用时壳工具仍在（拒绝执行）——
+      // 必须显式告知用户，不能让徽标宣称一个没生效的档位。
+      if (backendError !== undefined) {
+        ctx.ui?.notify(backendUnavailableNotice(backendError), "error");
+      }
+    });
   }
 
-  // 壳工具恒注册：不可用时其 operations 在调用点拒绝（bwrap → runner 失败分类；winacl → runner/Node 不可用），
-  // 构造失败则退化为“拒绝壳”。危险档仍委托 pi 本地 shell（用户显式决策）。
-  const shellName = confinedShellName();
-  const shellOptions: BashToolOptions = shellToolOptions ?? {
-    operations: refusingShellOperations(backendError ?? "sandbox backend construction failed", shellName, readState),
-  };
-  pi.registerTool(
-    (shellName === "powershell"
-      ? createPowerShellTool(store.workspaceRoot, shellOptions as never)
-      : createBashTool(store.workspaceRoot, shellOptions)) as never,
-  );
-
-  // 文件工具（write/edit）门控：被拒即征求用户批准（per-call 升级）
-  registerFileToolGate(pi, store, readState, () => store.mode !== "danger-full-access", () => backendError !== undefined);
-
-  // 未接管的同类壳：**平台态摘表**（win32 摘 git-bash `bash`，在 `session_start` 做）+ 此处门控兜底。
-  // 门控读档位真源：别的扩展 / `--tools` / `defaultTools` 把名字塞回工具表时，confined 档仍在调用点拦下。
-  registerForeignShellGate(pi, readState, () => shellName);
-
-  // `/sandbox` 命令：显示/切换全局档；更宽档需用户确认（门控/命令驱动、用户决策点）
+  // `/sandbox` 命令：显示/切换全局档；更宽档需用户确认（门控/命令驱动、用户决策点）。
+  // Windows 无沙箱：保留可见性，但只报告固定档、拒绝任何切换。
   pi.registerCommand("sandbox", {
     description: "显示/切换全局沙箱档位（read-only | workspace-write | danger-full-access）。",
     handler: async (args, ctx) => {
+      if (UNSANDBOXED_PLATFORM) {
+        ctx.ui.notify(
+          `本平台（Windows）没有可用的 OS 写面沙箱 → 档位固定为 ${store.mode}，不可切换。`
+            + '（原因见 docs/architecture.md「已知取舍」）',
+          "warning",
+        );
+        return;
+      }
+
       const input = (args ?? "").trim();
 
       // 交互选档位：空参数或非法参数时弹 picker（对齐 /model，避免手输打错）。
@@ -203,7 +220,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       if (choice !== "切换") return;
       const prev = store.mode;
       store.mode = mode;
-      updateSandboxBadge(ctx.ui);
+      updateSandboxBadge(ctx.ui, backendError);
       pi.appendEntry(SANDBOX_MODE_ENTRY, { mode });
       pi.sendMessage(
         { customType: `${SANDBOX_MODE_ENTRY}:notice`, content: `The user switched the sandbox mode: ${prev} → ${mode}`, display: true },
@@ -212,9 +229,12 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     },
   });
 
-  // 系统提示段：当前档位 + 门控说明
+  // 系统提示段：当前档位 + 门控说明（Windows 追加"本平台无沙箱、档位固定"）
   pi.on("before_agent_start", (event) => {
-    const content = renderPolicyContext(readState(process.cwd()));
+    let content = renderPolicyContext(readState(process.cwd()));
+    if (UNSANDBOXED_PLATFORM) {
+      content += ' This platform has no OS write sandbox: the mode is fixed at danger-full-access and cannot be switched.';
+    }
     return { systemPrompt: event.systemPrompt + "\n\n" + content };
   });
 }
