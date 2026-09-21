@@ -1,6 +1,6 @@
 # pi-sandbox-dsh
 
-A pi extension that confines the model's **write** actions with an OS boundary — the **enforcement axis** of the plan/enforcement split. Modeled on a single reference source: [dsh](https://github.com/deepseek-ai/deepseek-harness).
+A pi extension that confines the model's **write** actions — the **enforcement axis** of the plan/enforcement split. The shell tool runs under an **OS boundary** (bubblewrap on Linux/WSL2); the `write`/`edit` tools are held back by an **in-process `tool_call` guardrail**, which is *not* a security boundary. Modeled on a single reference source: [dsh](https://github.com/deepseek-ai/deepseek-harness).
 
 ## Model
 
@@ -24,7 +24,7 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 
 | Axis | Extension | State | Role |
 |---|---|---|---|
-| Enforcement | `pi-sandbox-dsh` | `sandbox/mode` | write-boundary OS sandbox |
+| Enforcement | `pi-sandbox-dsh` | `sandbox/mode` | write confinement: shell = OS boundary; write/edit = in-process guardrail |
 | Guidance | `pi-plan-dsh` | `plan/mode` | soft prompt guidance |
 
 `sandbox` never reads or writes `plan` state (and vice-versa); the two are independent and configured separately. This mirrors dsh's own split: *"Plan mode is soft guidance. Sandbox mode and approval policy enforce restrictions independently; neither reads nor writes plan state."* Together this pair **replaces the deprecated `pi-plan-mode`**.
@@ -36,6 +36,12 @@ The plan/enforcement split mirrors dsh and is fully orthogonal:
 3. Approval is **progressive escalation** (strictly wider ladder), not per-command popups or a command allowlist; repeating the effective tier is not an approval.
 4. **Fail closed where a backend exists**: on Linux/WSL2 a confined tier with no usable backend refuses to run (`SANDBOX_UNAVAILABLE`), never silently runs unconfined. Windows has no backend at all → a fixed, visible `danger-full-access` (never a claimed-but-absent sandbox).
 5. Approval never enters the model context; escalation is per-call only.
+
+### Commitment strength (what is actually enforced)
+
+- **Shell commands** (`bash`) run inside bubblewrap: writes outside the workspace are refused by the kernel. That is a **real OS boundary** for that tool.
+- **`write` / `edit`** are confined by an in-process `tool_call` gate (path containment). It runs in the pi process with the user's own permissions, so it is a **guardrail, not a security boundary** — pi's own security doc warns that a partial in-process sandbox "would be easy to misunderstand as a security boundary". Do not rely on it against a determined bypass; for strong isolation run the whole `pi` process inside a container/VM (pi `docs/containerization.md`).
+- Neither layer constrains `!` (your own commands) or RPC `bash`.
 
 ## Backends
 

@@ -1,6 +1,6 @@
 # pi-sandbox-dsh · 架构（精简）
 
-> 用 **OS 边界**约束模型的**写**面：连续 agent + 全局档位 + 逐级批准。读全开、网络不掺和、无命令白名单。
+> 用 **OS 边界**约束**壳命令**的写面（bwrap）；`write/edit` 由**进程内 `tool_call` 护栏**兜住（**非安全边界**）。连续 agent + 全局档位 + 逐级批准。读全开、网络不掺和、无命令白名单。
 > 单一参考源 = dsh `packages/sandbox/{sandbox,sandbox-local,sandbox-policy}`；锚点 `ddefc45fbc`。
 > **平台分叉（2026-09-21 决策）**：只有 **Linux/WSL2** 有 OS 写面沙箱（bwrap）；**Windows 无可用机制 → 固定 `danger-full-access`、不可切档**（见「已知取舍」）。
 > 行为约束见 `AGENTS.md`（本地文件、不入库）；不变量、已知取舍与验证入口见本文。
@@ -10,7 +10,7 @@
 | 需求 | pi 原生机制 |
 |---|---|
 | 壳命令收敛（Linux/WSL2） | `createBashTool` + `spawnHook`（bwrap 包 argv） |
-| 文件写面门控（Linux/WSL2） | `tool_call` 门控（write/edit；被拒 → `ui.select` 征求"允许本次"） |
+| 文件写面门控（Linux/WSL2） | `tool_call` 门控（write/edit；被拒 → `ui.select` 征求"允许本次"）——**护栏，非安全边界** |
 | 档位持久状态（Linux/WSL2） | `appendEntry('sandbox-mode')` + `getEntries()` 折叠（禁内存真源） |
 | 档位提示段 | `before_agent_start` 追加（≤ ~100 tok；档位不变时字节不变） |
 | 徽标 / 告知 | `ui.setStatus` + `ui.notify`（英文文案） |
@@ -35,7 +35,7 @@
 
 ## 不变量（回退先改这里）
 
-1. **管写面不管读面**；凭据靠"写面 + 网络出口"，不靠藏读。**写面之外的一切必须由断言证明不受影响**；因此**每条不变量/边界声明都要有一条可执行断言**（Linux/WSL2 见 `npm run probe`；Windows 的边界是"无沙箱"，由启动通知 + 固定档 + `/sandbox` 拒绝切换钉住）。
+1. **管写面不管读面**；凭据靠"写面 + 网络出口"，不靠藏读。**承诺强度**：只有**壳（bwrap）**是 **OS 边界**；`write/edit` 的进程内 `tool_call` 门控是**护栏**（pi 官方明言"部分进程内沙箱容易被误认为安全边界"）——**不得宣称是安全边界**，强隔离按 pi 官方走整进程容器/VM。**写面之外的一切必须由断言证明不受影响**；因此**每条不变量/边界声明都要有一条可执行断言**（Linux/WSL2 见 `npm run probe`；Windows 的边界是"无沙箱"，由启动通知 + 固定档 + `/sandbox` 拒绝切换钉住）。
 2. **档位 = 全局持续状态**，不与阶段绑定、无子档。**Windows 无阶梯**：只有固定 `danger-full-access`。
 3. **批准 = 逐级升级（严格更宽）**，不是每命令弹窗、不是命令白名单；重复当前档位不构成批准（dsh `ddefc45fbc` 语义）。
 4. **有后端的平台（Linux/WSL2）缝恒在位、不可用即拒**（`SANDBOX_UNAVAILABLE`，绝不裸跑）；**无后端的平台（Windows）固定 `danger-full-access`、不可切换**——**不假收敛**：不宣称一个不存在的沙箱。
@@ -52,6 +52,9 @@
 - **Windows 不做 OS 写面沙箱（2026-09-21 决策）**：唯一已实现的机制（`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单）与 **Schannel/SSPI 平台级不兼容**——受限壳里一切走 Windows 原生 TLS 栈的 HTTPS（`curl`/`git https`/`Invoke-WebRequest`）在握手前失败（`SEC_E_NO_CREDENTIALS 0x8009030E`）；**去掉 `DISABLE_MAX_PRIVILEGE`、或往 restricting 列表补 SID 都无效**（已证伪），同族还有组件自建 DACL（Python `tempfile` → pip/pytest 不可用）等缺口。候选替代机制（Low Integrity + 强制标签）**社区未验证**、在 dsh 中**无参考实现**、采用即**丢参考锚点**。故**删除 win32 后端**：固定 `danger-full-access`、不注册壳覆盖/门控，模型拿 pi 默认壳工具（`bash` + `powershell`），`!` 命令照常。完整证据链、最小复现与上游 8+ 重复帖见 `docs/dsh-upstream-report.md`（**自用留档，不对外提交**）。
 - Linux/WSL2 沙箱只限写面：不做读隔离、不做网络隔离、不做命令白名单；`danger-full-access` 是唯一出口。
 - **文件工具不覆盖 temp（有意不对称）**：`writableRoots` 只返回工作区，**不移植** dsh 的 `/tmp` + `os.tmpdir()`。因为 bwrap 的 `/tmp` 是 `--tmpfs /tmp` 的**私有临时盘**、与宿主 `/tmp` 不是同一目录——把宿主 `/tmp` 当可写根会让 write/edit 够到一个**壳都够不到**的共享位置，扩大暴露面。temp 类 scratch 走壳（私有 tmpfs）；`npm test`（`sandbox.spec`）钉住这条不对称。
+- **与 pi 官方隔离形态的关系（判定门 Q1/Q5 记录）**：pi 官方 **无内置沙箱**（`docs/security.md`）并劝退"部分进程内沙箱"；官方给出的形态是整进程容器/VM（Docker/OpenShell/Docker Sandboxes）或**工具路由扩展**（`examples/extensions/sandbox/` 用 `@anthropic-ai/sandbox-runtime` 覆盖 `bash` + 约束 `!`；`gondolin/` 覆盖 read/write/edit/bash/ls 路由进 micro-VM）。本扩展**不复用**它们，理由：① 官方 runtime/示例是**静态配置**（无档位阶梯/逐级批准），与本扩展的 dsh 轴不同；② 本扩展按**单一参考源 dsh** 移植 `bwrapProfileArgs`（逐字节一致），换官方 runtime 会丢参考锚点；③ 不引入额外依赖。**代价**：官方 runtime 覆盖 `!` 与网络/读策略，本扩展不覆盖（见下两条）。想要更强隔离时按 pi 官方建议把整个 pi 放进容器/VM。
+- **不约束 `!`（`user_bash`）（Q1 记录）**：pi 原生可用 `user_bash` 拦截 `!`/`!!` 并注入 `operations`（官方 `sandbox` 示例即如此）。本扩展**有意不拦**：`!` 是**用户自己**敲的命令、用户是授权主体；沙箱约束的是 **agent** 的动作，不是用户直连（与 dsh 一致）。若将来要拦：给 bwrap 后端加一条 operations 适配（`user_bash` 没有 `spawnHook`）。
+- **不提供读拒绝 / 网络策略（Q1 记录）**：pi 官方 `sandbox` 示例支持 `denyRead` 与网络域名白/黑名单。本扩展不变量 1 有意**读全开、网络不掺和**（dsh vocabulary 亦如此）；要读/网隔离请走整进程容器/VM。
 - pi 的 `before_agent_start` 每用户轮只跑一次 → 同轮内切档后提示段滞后一轮（由 notice 补偿）。
 - 分类窗口有界（64 KiB）；`user_bash`（`!`）与 RPC `bash` 不在约束内（边界声明）。
 - 后端不可用时 confined 档**没有可用壳**（fail-closed 的代价；出口 = 修后端或显式 `danger-full-access`）。
