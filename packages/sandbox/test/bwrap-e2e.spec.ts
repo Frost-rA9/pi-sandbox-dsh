@@ -88,6 +88,18 @@ if (spawnHook === undefined || operations === undefined) {
     }
   };
 
+  // env 白名单：保留 pi 注入的 PI_*（会话元数据，非机密），丢弃密钥类变量。
+  {
+    const ctx = spawnHook({
+      command: "true",
+      cwd: ws,
+      env: { ...process.env, PI_SESSION_ID: "sess-1", PI_MODEL: "m-1", MY_SECRET_TOKEN: "leak-me" },
+    });
+    assert(ctx.env.PI_SESSION_ID === "sess-1", "spawnHook preserves pi's PI_SESSION_ID");
+    assert(ctx.env.PI_MODEL === "m-1", "spawnHook preserves pi's PI_MODEL");
+    assert(ctx.env.MY_SECRET_TOKEN === undefined, "spawnHook drops non-allowlisted secrets");
+  }
+
   writeClean(file);
   const denied = await exec(`echo hi > ${file}`);
   assert(denied.exitCode !== 0, "classified: read-only write still fails");
@@ -99,7 +111,7 @@ if (spawnHook === undefined || operations === undefined) {
   assert(allowed.exitCode === 0, "classified: read-only read succeeds");
   assert(!allowed.output.includes("[sandbox:"), "classified: success carries no denial marker");
 
-  // runner 失败：PATH 前置一个假 bwrap（spawnHook 的白名单 env 取自 process.env，故注入 process 级 PATH），
+  // runner 失败：PATH 前置一个假 bwrap（spawnHook 的 env 白名单从入参 env 过滤，测试传入 process.env，故注入 process 级 PATH），
   // 它打印致命签名后退出非零，并同时输出一段 denial 方言文本。
   const fakeBin = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "dsh-fakebin-"));
   const fakeBwrap = join(fakeBin, "bwrap");

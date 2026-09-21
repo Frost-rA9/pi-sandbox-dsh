@@ -16,6 +16,8 @@ import { buildBwrapCommand, probeBwrap } from "./bwrap.ts";
 /**
  * 传给沙箱子进程的非机密环境变量白名单。
  * 既让工具运行（PATH/HOME/代理）恢复正常，又不泄漏 TOKEN/密钥类变量。
+ * `PI_*` 是 pi 的**会话元数据**（非机密）：pi 在 `spawnHook` 之前注入到入参 `env`
+ * （`exposeSessionEnvironment`，默认开）——`process.env` 里没有它们，故必须从入参 `env` 读。
  * 对齐设计不变量：凭据靠“写面 + 网络出口”约束，而非靠藏环境；但也不把机密环境变量暴露给模型 shell。
  */
 const SANDBOX_ENV_ALLOWLIST = [
@@ -23,13 +25,15 @@ const SANDBOX_ENV_ALLOWLIST = [
   'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'TERM',
   'http_proxy', 'https_proxy', 'no_proxy',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
+  // pi 会话元数据（非机密；由 pi 注入到 spawnHook 入参 env，不在 process.env 里）。
+  'PI_SESSION_ID', 'PI_SESSION_FILE', 'PI_PROVIDER', 'PI_MODEL', 'PI_REASONING_LEVEL',
 ] as const;
 
-/** 从 process.env 提取白名单内的非机密变量（工具运行必需，不含密钥）。 */
-function sandboxEnv(): Record<string, string> {
+/** 从 `source`（默认 process.env；spawnHook 传 pi 注入后的 env）提取白名单内的非机密变量。 */
+function sandboxEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const key of SANDBOX_ENV_ALLOWLIST) {
-    const value = process.env[key];
+    const value = source[key];
     if (value !== undefined) out[key] = value;
   }
   return out;
@@ -68,14 +72,15 @@ class BwrapBackend implements SandboxBackend {
   createToolOptions(ctx: BackendContext): BashToolOptions {
     return {
       // argv 收敛：把命令包成 `bwrap … sh -c '<cmd>'`（由 pi 在 exec 前应用）。
-      spawnHook: ({ command, cwd }) => {
+      spawnHook: ({ command, cwd, env }) => {
         const policy = ctx.readState(cwd);
-        const env = sandboxEnv(); // 保留 PATH/HOME/代理等，工具可用且不泄漏密钥
+        // 从 pi 注入后的入参 env 过滤（保留 PATH/HOME/代理/PI_*，不泄漏密钥）。
+        const filtered = sandboxEnv(env);
         if (policy.mode === "danger-full-access") {
-          return { command, cwd, env };
+          return { command, cwd, env: filtered };
         }
         const wrapped = buildBwrapCommand(command, policy);
-        return { command: wrapped, cwd, env };
+        return { command: wrapped, cwd, env: filtered };
       },
       // 结果侧分类：runner 失败 → fail-closed；denial → 追模型可见标记。
       operations: createConfinedOperations(createLocalBashOperations(), resolveRunFacts(ctx, "bwrap")),
