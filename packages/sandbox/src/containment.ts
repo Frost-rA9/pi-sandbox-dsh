@@ -60,7 +60,14 @@ export function isPathUnder(target: string, root: string, caseSensitive: boolean
   return false;
 }
 
-/** 某档位下允许写的根集合（对齐 dsh `writableRoots`；temp 区暂不展开）。 */
+/**
+ * 某档位下允许写的根集合（**文件工具**视角）。
+ *
+ * **有意裁剪（2026-09-21，见 `docs/architecture.md`「已知取舍」）**：dsh 的 `writableRoots` 会带上 `/tmp` 与
+ * `os.tmpdir()`，那是给 Seatbelt（macOS，`/tmp` 即宿主 `/tmp`）配的 parity。pi 在 Linux/WSL2 用的是 bwrap，
+ * 壳里的 `/tmp` 是 `--tmpfs /tmp` 的**私有临时盘**、与宿主 `/tmp` 不是同一个目录——把宿主 `/tmp` 加进来只会
+ * 让 write/edit 够到一个**壳都够不到**的共享位置，扩大暴露面。故文件工具只认工作区；temp 类 scratch 走壳。
+ */
 export function writableRoots(policy: { mode: string; workspaceRoot: string }): readonly string[] {
   if (policy.mode === "workspace-write") {
     return [policy.workspaceRoot];

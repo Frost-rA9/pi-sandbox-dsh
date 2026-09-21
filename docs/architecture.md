@@ -51,6 +51,7 @@
 - 不做命令白名单；不做 plan/build 双模式；不隐藏读；`danger-full-access` 也要用户确认（Linux/WSL2）。
 - **Windows 不做 OS 写面沙箱（2026-09-21 决策）**：唯一已实现的机制（`WRITE_RESTRICTED` 受限令牌 + NTFS ACE 写白名单）与 **Schannel/SSPI 平台级不兼容**——受限壳里一切走 Windows 原生 TLS 栈的 HTTPS（`curl`/`git https`/`Invoke-WebRequest`）在握手前失败（`SEC_E_NO_CREDENTIALS 0x8009030E`）；**去掉 `DISABLE_MAX_PRIVILEGE`、或往 restricting 列表补 SID 都无效**（已证伪），同族还有组件自建 DACL（Python `tempfile` → pip/pytest 不可用）等缺口。候选替代机制（Low Integrity + 强制标签）**社区未验证**、在 dsh 中**无参考实现**、采用即**丢参考锚点**。故**删除 win32 后端**：固定 `danger-full-access`、不注册壳覆盖/门控，模型拿 pi 默认壳工具（`bash` + `powershell`），`!` 命令照常。完整证据链、最小复现与上游 8+ 重复帖见 `docs/dsh-upstream-report.md`（**自用留档，不对外提交**）。
 - Linux/WSL2 沙箱只限写面：不做读隔离、不做网络隔离、不做命令白名单；`danger-full-access` 是唯一出口。
+- **文件工具不覆盖 temp（有意不对称）**：`writableRoots` 只返回工作区，**不移植** dsh 的 `/tmp` + `os.tmpdir()`。因为 bwrap 的 `/tmp` 是 `--tmpfs /tmp` 的**私有临时盘**、与宿主 `/tmp` 不是同一目录——把宿主 `/tmp` 当可写根会让 write/edit 够到一个**壳都够不到**的共享位置，扩大暴露面。temp 类 scratch 走壳（私有 tmpfs）；`npm test`（`sandbox.spec`）钉住这条不对称。
 - pi 的 `before_agent_start` 每用户轮只跑一次 → 同轮内切档后提示段滞后一轮（由 notice 补偿）。
 - 分类窗口有界（64 KiB）；`user_bash`（`!`）与 RPC `bash` 不在约束内（边界声明）。
 - 后端不可用时 confined 档**没有可用壳**（fail-closed 的代价；出口 = 修后端或显式 `danger-full-access`）。

@@ -118,7 +118,7 @@ export function renderPolicyContext(policy: SandboxExecutionPolicy): string {
     case 'read-only':
       return 'Current DSH file policy: read-only. Confined operations cannot modify files. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
     case 'workspace-write':
-      return `Current DSH file policy: workspace-write. Confined operations may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Some platform temporary areas may also be writable.`
+      return `Current DSH file policy: workspace-write. Confined operations may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Shell commands also get a private temp area.`
     case 'danger-full-access':
       return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.'
     default: {

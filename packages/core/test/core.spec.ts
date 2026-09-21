@@ -28,6 +28,8 @@ const danger = { mode: "danger-full-access" as const, workspaceRoot: "/w" };
 assert(classifyFileWrite({ toolName: "write", target: "/w/a.txt" }, roPolicy).decision === "deny", "read-only denies write");
 assert(classifyFileWrite({ toolName: "edit", target: "/w/a.txt" }, wwPolicy).decision === "allow", "workspace-write allows in root");
 assert(classifyFileWrite({ toolName: "write", target: "/outside.txt" }, wwPolicy).decision === "deny", "workspace-write denies outside");
+// 有意不对称（docs/architecture.md）：文件工具不覆盖宿主 temp——bwrap 的 /tmp 是私有 tmpfs，不是宿主 /tmp。
+assert(classifyFileWrite({ toolName: "write", target: "/tmp/scratch.txt" }, wwPolicy).decision === "deny", "workspace-write denies host temp (deliberate asymmetry)");
 assert(classifyFileWrite({ toolName: "write", target: "/outside.txt" }, danger).decision === "allow", "danger allows");
 assert(classifyFileWrite({ toolName: "write", target: undefined }, wwPolicy).decision === "deny", "no target denies");
 assert(denyReason({ reason: "x" }, true).includes("/sandbox"), "denyReason adds the mode-switch hint when advertise");

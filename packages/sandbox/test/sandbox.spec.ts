@@ -76,6 +76,14 @@ assert(isPathUnder(outside, ws) === false, "outside root");
 assert(isPathUnder(join(ws, "..", "outside.txt"), ws) === false, "lexical .. escape rejected");
 assert(writableRoots({ mode: "workspace-write", workspaceRoot: ws }).length === 1, "workspace-write has 1 root");
 assert(writableRoots({ mode: "read-only", workspaceRoot: ws }).length === 0, "read-only has 0 roots");
+// 有意不对称（docs/architecture.md「已知取舍」）：文件工具只认工作区，不把宿主 temp 当可写根。
+// bwrap 壳里的 /tmp 是私有 tmpfs、与宿主 /tmp 不是同一目录 → 移植 dsh 的 temp 根只会扩大暴露面。
+const hostTempFile = join(tmpdir(), "dsh-fence-host-temp.txt");
+assert(isPathUnder(hostTempFile, ws) === false, "host temp is not under the workspace root");
+assert(
+  !writableRoots({ mode: "workspace-write", workspaceRoot: ws }).some((root) => isPathUnder(hostTempFile, root)),
+  "host temp is not a writable root (deliberate asymmetry vs the shell's private tmpfs)",
+);
 rmSync(ws, { recursive: true, force: true });
 
 console.log(`\n结果是: ${passed} passed, ${failed} failed`);
